@@ -4,7 +4,8 @@ Orchestrator — runs all 4 extraction stages in order and saves all outputs.
 
 Stage 1: parse_pdf             → DoclingParseResult
 Stage 2: classify_statement_pages + tag_tables → page_classes
-Stage 3: extract_from_docling_tables → resolved_df, pivot_df
+Stage 3: extract_with_llm → resolved_df, pivot_df  (V2 primary path)
+         extract_candidates_from_page → fallback if LLM returns < 3 candidates
 Stage 4: chunk_document + build_faiss_index → chunks
 """
 
@@ -28,6 +29,7 @@ from extraction.metric_extractor import (
     pivot_metrics,
     run_accounting_checks,
 )
+from extraction.llm import extract_with_llm
 from extraction.parser import parse_pdf
 from extraction.text_chunker import TextChunk, build_faiss_index, chunk_document
 
@@ -98,11 +100,12 @@ class ExtractionPipeline:
 
         # ── Stage 3: Metric extraction ───────────────────────────────────────
         _log("Stage 3/4: Extracting metrics...")
-        candidates = extract_from_docling_tables(parse_result.tables, page_classes, doc_id)
-        _log(f"  Docling table candidates: {len(candidates)}")
+        pages = {i + 1: text for i, text in enumerate(parse_result.pages_raw_text)}
+        candidates = extract_with_llm(pages, page_classes, doc_id)
+        _log(f"  LLM extraction candidates: {len(candidates)}")
 
         if len(candidates) < 3:
-            _log("  Docling candidates < 3 — running line-parse fallback on all pages...")
+            _log("  LLM candidates < 3 — running V1 line-parse fallback on all pages...")
             doc_years = _detect_doc_years(parse_result.pages_raw_text)
             class_map = {pc.page_no: pc for pc in page_classes}
 
