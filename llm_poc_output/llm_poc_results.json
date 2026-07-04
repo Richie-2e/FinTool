@@ -1,0 +1,350 @@
+{
+  "report": {
+    "model": "qwen2.5:3b",
+    "pdf": "uploads/AR_26628_OFSS_2024_2025_A_27062025192147.pdf",
+    "total_metrics_extracted": 23,
+    "unique_canonical_names_found": 9,
+    "canonical_coverage": "9/17",
+    "coverage_pct": 52.9,
+    "missing_metrics": [
+      "current_assets",
+      "current_liabilities",
+      "long_term_debt",
+      "short_term_debt",
+      "operating_cash_flow",
+      "investing_cash_flow",
+      "financing_cash_flow",
+      "capex"
+    ],
+    "confidence_distribution": {
+      "high": 19,
+      "medium": 4,
+      "low": 0
+    },
+    "call_stats": [
+      {
+        "statement_type": "balance_sheet",
+        "pages_used": [
+          61,
+          129
+        ],
+        "chars_sent": 6000,
+        "latency_s": 44.08,
+        "json_valid": true,
+        "metrics_returned": 7
+      },
+      {
+        "statement_type": "income_statement",
+        "pages_used": [
+          62,
+          96,
+          130
+        ],
+        "chars_sent": 6000,
+        "latency_s": 39.33,
+        "json_valid": true,
+        "metrics_returned": 7
+      },
+      {
+        "statement_type": "cash_flow",
+        "pages_used": [
+          117,
+          177
+        ],
+        "chars_sent": 6000,
+        "latency_s": 71.71,
+        "json_valid": true,
+        "metrics_returned": 9
+      }
+    ],
+    "total_latency_s": 155.12,
+    "avg_latency_per_call_s": 51.71
+  },
+  "metrics": [
+    {
+      "canonical_name": "total_assets",
+      "raw_label": "TOTAL",
+      "value": 101350,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "[Page 61] TOTAL = 101,350"
+      ],
+      "statement_type": "balance_sheet"
+    },
+    {
+      "canonical_name": "total_liabilities",
+      "raw_label": "TOTAL",
+      "value": 101350,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "[Page 61] TOTAL = 101,350"
+      ],
+      "statement_type": "balance_sheet"
+    },
+    {
+      "canonical_name": "total_equity",
+      "raw_label": "Total equity",
+      "value": 83624,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "[Page 61] Total equity = 83,624"
+      ],
+      "statement_type": "balance_sheet"
+    },
+    {
+      "canonical_name": "total_liabilities",
+      "raw_label": "Total liabilities",
+      "value": 7971,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "[Page 61] Total liabilities = 6,217"
+      ],
+      "statement_type": "balance_sheet"
+    },
+    {
+      "canonical_name": "total_assets",
+      "raw_label": "TOTAL",
+      "value": 99357,
+      "unit": "INR million",
+      "year": 2024,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "[Page 61] TOTAL = 99,357"
+      ],
+      "statement_type": "balance_sheet"
+    },
+    {
+      "canonical_name": "total_liabilities",
+      "raw_label": "Total liabilities",
+      "value": 7971,
+      "unit": "INR million",
+      "year": 2024,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "[Page 61] Total liabilities = 7,971"
+      ],
+      "statement_type": "balance_sheet"
+    },
+    {
+      "canonical_name": "total_equity",
+      "raw_label": "Total equity",
+      "value": 83588,
+      "unit": "INR million",
+      "year": 2024,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "[Page 61] Total equity = 78,588"
+      ],
+      "statement_type": "balance_sheet"
+    },
+    {
+      "canonical_name": "revenue",
+      "raw_label": "Revenue from operations",
+      "value": 17,
+      "unit": "\u20b9 million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": "Consolidated statement of profit and loss for the year ended March 31, 2025",
+      "statement_type": "income_statement"
+    },
+    {
+      "canonical_name": "gross_profit",
+      "raw_label": null,
+      "value": null,
+      "unit": null,
+      "year": 2025,
+      "confidence": "medium",
+      "section_type": "consolidated",
+      "evidence": "Consolidated statement of profit and loss for the year ended March 31, 2025",
+      "statement_type": "income_statement"
+    },
+    {
+      "canonical_name": "operating_profit",
+      "raw_label": null,
+      "value": null,
+      "unit": null,
+      "year": 2025,
+      "confidence": "medium",
+      "section_type": "consolidated",
+      "evidence": "Consolidated statement of profit and loss for the year ended March 31, 2025",
+      "statement_type": "income_statement"
+    },
+    {
+      "canonical_name": "net_profit",
+      "raw_label": "Profit for the year",
+      "value": 23796,
+      "unit": "\u20b9 million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": "Consolidated statement of profit and loss for the year ended March 31, 2025",
+      "statement_type": "income_statement"
+    },
+    {
+      "canonical_name": "total_assets",
+      "raw_label": null,
+      "value": null,
+      "unit": null,
+      "year": 2025,
+      "confidence": "medium",
+      "section_type": "consolidated",
+      "evidence": "Consolidated statement of profit and loss for the year ended March 31, 2025",
+      "statement_type": "income_statement"
+    },
+    {
+      "canonical_name": "total_liabilities",
+      "raw_label": null,
+      "value": null,
+      "unit": null,
+      "year": 2025,
+      "confidence": "medium",
+      "section_type": "consolidated",
+      "evidence": "Consolidated statement of profit and loss for the year ended March 31, 2025",
+      "statement_type": "income_statement"
+    },
+    {
+      "canonical_name": "total_equity",
+      "raw_label": "Total equity attributable to equity holders of the Company",
+      "value": 86863101,
+      "unit": "\u20b9 million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": "Consolidated statement of changes in equity for the year ended March 31, 2025",
+      "statement_type": "income_statement"
+    },
+    {
+      "canonical_name": "cash_and_equivalents",
+      "raw_label": "Cash flows from operating activities\nCash from operating activities",
+      "value": 33547,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Cash flows from operating activities\nCash from operating activities: 33,547"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "cash_and_equivalents",
+      "raw_label": "Consolidated statement of cash flow \nfor the year ended March 31, 2025\nCash and cash equivalents at end of the year",
+      "value": 12142,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Consolidated statement of cash flow \nfor the year ended March 31, 2025\nCash and cash equivalents at end of the year: 12,142"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "total_assets",
+      "raw_label": "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nTotal Assets",
+      "value": 7879,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nTotal Assets: 7879"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "total_liabilities",
+      "raw_label": "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nTotal Liabilities",
+      "value": 6363,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nTotal Liabilities: 6363"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "total_equity",
+      "raw_label": "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nTotal Equity",
+      "value": 1527,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nTotal Equity: 1527"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "interest_expense",
+      "raw_label": "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nInterest expense on borrowings",
+      "value": -5,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2025\nInterest expense on borrowings: -5"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "interest_expense",
+      "raw_label": "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2024\nInterest expense on borrowings",
+      "value": -281,
+      "unit": "INR million",
+      "year": 2024,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2024\nInterest expense on borrowings: -281"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "total_liabilities",
+      "raw_label": "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2024\nTotal Liabilities",
+      "value": 6363,
+      "unit": "INR million",
+      "year": 2024,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2024\nTotal Liabilities: 6363"
+      ],
+      "statement_type": "cash_flow"
+    },
+    {
+      "canonical_name": "total_equity",
+      "raw_label": "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2024\nTotal Equity",
+      "value": 1527,
+      "unit": "INR million",
+      "year": 2024,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": [
+        "Oracle Financial Services Software\u2009\u2013\u2009Annual Report 2024-25 (Amounts in \u20b9 million)\nYear ended March 31, 2024\nTotal Equity: 1527"
+      ],
+      "statement_type": "cash_flow"
+    }
+  ]
+}

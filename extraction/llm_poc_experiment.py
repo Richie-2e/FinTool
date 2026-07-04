@@ -57,8 +57,9 @@ STATEMENT_KEYWORDS: dict[str, list[str]] = {
                            "statement of cash flows"],
 }
 
-# Maximum characters sent per LLM call (keeps within 3b context limit)
-MAX_CHARS_PER_CALL = 6000
+# Maximum characters sent per LLM call.
+# Raised to 10000 to ensure cash flow continuation pages are fully included.
+MAX_CHARS_PER_CALL = 10000
 
 # ---------------------------------------------------------------------------
 # Step 1 — Extract text from PDF
@@ -118,16 +119,14 @@ def find_statement_pages(pages: dict[int, str]) -> dict[str, list[int]]:
 def get_page_block(pages: dict[int, str], page_nos: list[int], max_chars: int) -> str:
     """
     Concatenates text from the given pages, up to max_chars total.
-    Takes the first occurrence page + up to 2 following pages to capture
-    multi-page tables.
+    Uses only the provided page numbers — no longer adds sequential neighbors.
+    The caller is responsible for supplying the right pages (classified pages only,
+    plus any explicitly required continuation pages).
     """
     if not page_nos:
         return ""
-    # Use first hit + next 2 pages
-    start = page_nos[0]
-    candidates = [start, start + 1, start + 2]
     block = ""
-    for pno in candidates:
+    for pno in page_nos:
         if pno in pages:
             block += f"\n--- Page {pno} ---\n" + pages[pno]
         if len(block) >= max_chars:
@@ -152,10 +151,29 @@ Rules:
 8. Output ONLY a valid JSON object. No explanation text outside the JSON.
 9. IMPORTANT — Indian Balance Sheet format: The word "TOTAL" appears TWICE.
    First TOTAL = Total Assets (sum of all assets). Second TOTAL = Total Equity + Liabilities.
-   These two totals are always equal (balance sheet identity). Do NOT treat the second
-   TOTAL as "total_liabilities". Extract "total_assets" from the first TOTAL only.
-   For total_liabilities: add non-current liabilities subtotal + current liabilities subtotal.
+   These two totals are always equal (balance sheet identity).
+   Rules for TOTAL rows:
+   - Extract total_assets ONLY from the first TOTAL (under the ASSETS section).
+   - Do NOT extract total_assets, total_liabilities, or current_liabilities from the second TOTAL.
+   - The second TOTAL row value is the same as total_assets — it is a balance check, NOT a liability.
+12. IMPORTANT — total_liabilities has NO explicit label in Indian balance sheets.
+    To find total_liabilities: look for the standalone subtotal number that appears at the
+    END of the liabilities section (after all liability line items), BEFORE the second TOTAL row.
+    This subtotal equals non-current liabilities subtotal + current liabilities subtotal.
+    Example: if non-current liabilities end with subtotal 6,217 and current liabilities end
+    with subtotal 11,509, then total_liabilities = 17,726.
+    DO NOT use the TOTAL row value (e.g. 101,350) for total_liabilities.
+13. IMPORTANT — current_liabilities: look for the standalone subtotal at the END of the
+    "Current liabilities" section. It is a plain number on its own line before the TOTAL row.
+    Do NOT use the TOTAL row value for current_liabilities.
 10. Keep evidence snippets short (under 100 characters).
+11. IMPORTANT — Note reference numbers: Indian financial statements include a "Notes" column.
+    Note references are small standalone integers (1–50) that appear on their own line
+    immediately after a row label and immediately before the actual financial values.
+    Example: "Revenue from operations\n17\n68,468\n63,730" — here 17 is the note reference,
+    NOT the revenue value. The revenue values are 68,468 and 63,730.
+    Rule: if you see a standalone integer ≤ 50 between a label and large financial figures,
+    skip it entirely. Extract only the large comma-formatted numbers that follow.
 
 Output schema:
 {
@@ -250,7 +268,7 @@ def call_ollama(statement_type: str, text_block: str) -> tuple[dict | None, floa
         "stream": False,
         "options": {
             "temperature": 0,
-            "num_predict": 2500,
+            "num_predict": 4096,
         },
     }
 
@@ -399,15 +417,28 @@ def run_experiment() -> dict:
             print(f"[Skip] No pages found for {stmt_type}")
             continue
 
-        text_block = get_page_block(pages, page_nos, MAX_CHARS_PER_CALL)
+        # Use only the primary (first) classified page for balance_sheet and
+        # income_statement.  Multiple classified pages for the same type include
+        # standalone statements and notes pages — mixing them contaminates values.
+        # For cash_flow: also include the immediately following page, because
+        # financing activities and the closing cash balance appear on the
+        # continuation page without a statement title of their own.
+        if stmt_type == "cash_flow":
+            cont = page_nos[0] + 1
+            effective_pages = [page_nos[0], cont]
+            print(f"[Context] cash_flow: using pages {effective_pages}")
+        else:
+            effective_pages = [page_nos[0]]
+
+        text_block = get_page_block(pages, effective_pages, MAX_CHARS_PER_CALL)
         char_count = len(text_block)
-        print(f"\n[LLM] Calling model for {stmt_type} ({char_count} chars) ...")
+        print(f"\n[LLM] Calling model for {stmt_type} ({char_count} chars, pages {effective_pages[:4]}) ...")
 
         result, latency, json_ok = call_ollama(stmt_type, text_block)
 
         stat = {
             "statement_type": stmt_type,
-            "pages_used": page_nos[:3],
+            "pages_used": effective_pages[:4],
             "chars_sent": char_count,
             "latency_s": round(latency, 2),
             "json_valid": json_ok,

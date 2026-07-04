@@ -1,0 +1,58 @@
+/Users/rishimane/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+============================================================
+LLM PoC Experiment — qwen2.5:3b
+============================================================
+[PDF] Extracted 193 pages from AR_26628_OFSS_2024_2025_A_27062025192147.pdf
+[Classify] balance_sheet: pages [61, 129]
+[Classify] income_statement: pages [62, 96, 130, 162]
+[Classify] cash_flow: pages [117, 177]
+
+[LLM] Calling model for balance_sheet (2603 chars, pages [61]) ...
+  → 4 metrics extracted in 24.1s
+
+[LLM] Calling model for income_statement (2418 chars, pages [62]) ...
+  → 10 metrics extracted in 41.9s
+[Context] cash_flow: using pages [117, 118]
+
+[LLM] Calling model for cash_flow (4289 chars, pages [117, 118]) ...
+  → 9 metrics extracted in 56.3s
+
+============================================================
+RESULTS SUMMARY
+============================================================
+Coverage     : 11/17 (64.7%)
+Total metrics: 23
+Confidence   : {'high': 18, 'medium': 0, 'low': 5}
+Total latency: 122.23s
+Avg/call     : 40.74s
+Missing      : ['interest_expense', 'current_assets', 'operating_cash_flow', 'investing_cash_flow', 'financing_cash_flow', 'capex']
+
+Full results saved → extraction_outputs/llm_poc_results.json
+
+EXTRACTED METRICS:
+  Metric                    Year   Value           Conf     Section
+  ----------------------------------------------------------------------
+  cash_and_equivalents             34,833          high     consolidated
+  cash_and_equivalents      2025   null            high     consolidated
+  cash_and_equivalents      2025   12,142          high     consolidated
+  current_liabilities              665             high     consolidated
+  current_liabilities       2025   101,508         high     consolidated
+  current_liabilities       2025   38,401          high     consolidated
+  gross_profit              2025   null            low      consolidated
+  long_term_debt                   24,526          high     consolidated
+  long_term_debt            2025   null            low      consolidated
+  net_profit                2025   23,796          high     consolidated
+  operating_profit          2025   33,109          high     consolidated
+  revenue                   2025   68,468          high     consolidated
+  short_term_debt                  15,980          high     consolidated
+  short_term_debt           2025   null            low      consolidated
+  total_assets                     34,833          high     consolidated
+  total_assets              2025   101,350         high     consolidated
+  total_assets              2025   null            low      consolidated
+  total_equity                     34,833          high     consolidated
+  total_equity              2025   83,624          high     consolidated
+  total_equity              2025   23,796          high     consolidated
+  total_liabilities                23,498          high     consolidated
+  total_liabilities         2025   101,350         high     consolidated
+  total_liabilities         2025   null            low      consolidated
