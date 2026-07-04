@@ -1,0 +1,33 @@
+# Large datasets
+2024_q4/
+2025_05/
+2026_01/
+edgar_output/
+test/
+# Generated outputs
+uploads/
+extraction_outputs/
+
+# Scratch notebooks
+*.ipynb
+
+# Scratch files
+file.txt
+file2.md
+files3.md
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Secrets
+.env
+
+# macOS
+.DS_Store
+
+.env.example
+
+*.db
