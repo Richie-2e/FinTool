@@ -2,6 +2,18 @@
 classifier.py
 Stage 2 — Page classification and table tagging.
 Keyword-based; no ML required.
+
+Financial statement detection uses two independent filters, both must pass:
+  1. Title-area check  — keyword must appear in the first _TITLE_LINES lines.
+  2. Numeric density   — page must contain >= _MIN_FINANCIAL_NUMBERS Indian-
+                         formatted numbers (e.g. 68,468 or 1,89,483).
+
+Narrative sections (notes, mda) are detected on the full page body without
+a numeric density requirement, since accounting-policy pages have no tables.
+
+This design mirrors the PoC classifier (find_statement_pages in
+llm_poc_experiment.py) which achieved zero false positives on OFSS FY2024-25
+by using the same two-filter approach.
 """
 
 from __future__ import annotations
@@ -26,13 +38,32 @@ class PageClassification:
 
 
 # ---------------------------------------------------------------------------
-# Keyword maps — ordered by priority (first match wins within a page)
+# Filter constants
 # ---------------------------------------------------------------------------
 
-_STATEMENT_KEYWORDS: list[tuple[str, list[str]]] = [
+# Only the first _TITLE_LINES lines of a page are checked for financial
+# statement keywords. Lines beyond this threshold are body/prose text where
+# the same words appear in accounting policy descriptions and notes.
+_TITLE_LINES: int = 8
+
+# A genuine financial statement page contains dense numeric content.
+# This pattern matches Indian-formatted numbers (e.g. 68,468 or 1,89,483).
+_NUM_RE = re.compile(r"\d{1,3}(?:,\d{3})+")
+_MIN_FINANCIAL_NUMBERS: int = 5
+
+
+# ---------------------------------------------------------------------------
+# Keyword maps — split by detection strategy
+# ---------------------------------------------------------------------------
+
+# Financial statement keywords: checked in title area ONLY (first _TITLE_LINES
+# lines), AND only when the page meets the numeric density threshold.
+# "assets and liabilities" removed — 0 true positives, 19 false positives on
+# OFSS (appears in deferred-tax notes and segment disclosures, never as a
+# standalone page title).
+_FINANCIAL_KEYWORDS: list[tuple[str, list[str]]] = [
     ("balance_sheet", [
         "balance sheet",
-        "assets and liabilities",
         "statement of financial position",
     ]),
     ("income_statement", [
@@ -40,12 +71,18 @@ _STATEMENT_KEYWORDS: list[tuple[str, list[str]]] = [
         "statement of profit",
         "income statement",
         "revenue from operations",
+        "statement of operations",
     ]),
     ("cash_flow", [
         "cash flow statement",
         "cash flows from operating",
         "statement of cash flow",
     ]),
+]
+
+# Narrative keywords: checked against the full page body. Accounting-policy
+# and MDA pages have no dense numeric content, so no density gate is applied.
+_NARRATIVE_KEYWORDS: list[tuple[str, list[str]]] = [
     ("notes", [
         "notes to",
         "notes forming part",
@@ -66,11 +103,21 @@ _STANDALONE_RE   = re.compile(r"\bstandalone\b",   re.IGNORECASE)
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _classify_statement_type(text_lower: str) -> str:
-    for stmt_type, keywords in _STATEMENT_KEYWORDS:
+def _classify_financial_type(title_lower: str) -> str:
+    """Match financial statement keywords against the page title area only."""
+    for stmt_type, keywords in _FINANCIAL_KEYWORDS:
         for kw in keywords:
-            if kw in text_lower:
+            if kw in title_lower:
                 return stmt_type
+    return "other"
+
+
+def _classify_narrative_type(body_lower: str) -> str:
+    """Match narrative section keywords against the full page body."""
+    for narr_type, keywords in _NARRATIVE_KEYWORDS:
+        for kw in keywords:
+            if kw in body_lower:
+                return narr_type
     return "other"
 
 
@@ -92,12 +139,32 @@ def classify_statement_pages(pages_raw_text: list[str]) -> list[PageClassificati
     """
     Returns one PageClassification per page for all pages (including 'other').
     page_no is 1-indexed to match DoclingTable.page_no.
+
+    Financial statement pages (balance_sheet, income_statement, cash_flow) are
+    detected using two independent filters that must both pass:
+      1. A statement keyword appears in the first _TITLE_LINES lines.
+      2. The page contains >= _MIN_FINANCIAL_NUMBERS Indian-formatted numbers.
+
+    Narrative pages (notes, mda) are detected on the full body text with no
+    numeric density requirement.
     """
     result: list[PageClassification] = []
     for idx, page_text in enumerate(pages_raw_text):
         page_no = idx + 1
-        text_lower = page_text.lower()
-        stmt_type = _classify_statement_type(text_lower)
+        title_area = "\n".join(page_text.splitlines()[:_TITLE_LINES]).lower()
+        body_lower  = page_text.lower()
+        numeric_count = len(_NUM_RE.findall(page_text))
+
+        # Financial statement: must pass both title-area AND density check
+        if numeric_count >= _MIN_FINANCIAL_NUMBERS:
+            stmt_type = _classify_financial_type(title_area)
+        else:
+            stmt_type = "other"
+
+        # Narrative fallback: checked on full body, no density gate
+        if stmt_type == "other":
+            stmt_type = _classify_narrative_type(body_lower)
+
         section_type = _classify_section_type(page_text)
         result.append(PageClassification(
             page_no=page_no,

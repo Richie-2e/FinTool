@@ -1,0 +1,113 @@
+
+⏺ All three primary pages are now correct. Let me do a final check of the complete
+  updated file and verify no interface was broken:
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Clean. Now verify tag_tables_with_classification and text_chunker still work
+  with the new output:
+
+⏺ Bash(python3 -c "
+      # Full interface compatibility check…)
+  ⎿  /Users/rishimane/Library/Python/3.9/lib/python/site-packages/urllib3/__i
+     nit__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+,
+      currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: http
+     … +9 lines (ctrl+o to expand)
+
+⏺ All checks pass. Here is the complete explanation.
+
+  ---
+  Classifier Improvement — Changes Explained
+
+  Root cause analysis (what made the PoC more accurate)
+
+  The PoC classifier used two independent filters that both had to pass before
+  classifying a page as a financial statement:
+
+  1. Title-area restriction: keywords searched only in the first 8 lines
+  2. Numeric density gate: page must contain ≥ 5 Indian-formatted numbers
+
+  The production classifier had neither. It searched the full page body with no
+  density check, turning every accounting-policy note, auditor report, and MDA
+  paragraph that mentioned "balance sheet" or "profit and loss" into a false
+  positive.
+
+  Numbers confirmed this completely:
+
+  ┌─────────────────────────────────────────────────┬─────────────────────────┐
+  │                      Issue                      │          Count          │
+  ├─────────────────────────────────────────────────┼─────────────────────────┤
+  │ "balance sheet" appears in OFSS body text (FP   │ 27 pages                │
+  │ only)                                           │                         │
+  ├─────────────────────────────────────────────────┼─────────────────────────┤
+  │ "assets and liabilities" — zero TPs, pure noise │ 19 pages                │
+  ├─────────────────────────────────────────────────┼─────────────────────────┤
+  │ "profit and loss" in body text (notes,          │ 27 pages                │
+  │ policies)                                       │                         │
+  ├─────────────────────────────────────────────────┼─────────────────────────┤
+  │ Old classifier first-hit pages sent to LLM      │ 9, 12, 36 (all wrong)   │
+  ├─────────────────────────────────────────────────┼─────────────────────────┤
+  │ New classifier first-hit pages sent to LLM      │ 62, 61, 117 (all        │
+  │                                                 │ correct)                │
+  └─────────────────────────────────────────────────┴─────────────────────────┘
+
+  ---
+  Changes made to classifier.py
+
+  Three targeted changes, zero interface modifications:
+
+  1. Module docstring — explains the two-filter design and why it matches the PoC.
+
+  2. Constant block replaced by a structured block:
+  - Added _TITLE_LINES = 8, _NUM_RE, _MIN_FINANCIAL_NUMBERS = 5
+  - Replaced _STATEMENT_KEYWORDS (one flat list) with two separate lists:
+    - _FINANCIAL_KEYWORDS — checked in title area + requires density
+    - _NARRATIVE_KEYWORDS — checked in full body, no density
+  - Removed "assets and liabilities" from _FINANCIAL_KEYWORDS (0 TP, 19 FP — never
+  appears as a page title)
+
+  3. classify_statement_pages() updated — now applies both filters in sequence:
+  - Financial statement detection: numeric_count >= 5 AND keyword in first 8 lines
+  - Narrative fallback: no density gate, full body search
+  - _classify_statement_type() renamed to _classify_financial_type() and
+  _classify_narrative_type() (split responsibilities clearly)
+
+  Unchanged: PageClassification dataclass, classify_statement_pages() signature,
+  tag_tables_with_classification(), _classify_section_type(), all imports.
+
+  ---
+  Benchmark result
+
+  ┌───────────────────────────────────┬───────────┬──────────────┬───────────┐
+  │              Metric               │ Old (V1)  │   New (V2)   │   PoC     │
+  │                                   │           │              │  target   │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ Total non-other pages found       │ 64        │ 16           │ ~8        │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ balance_sheet FP                  │ 41        │ 0            │ 0         │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ income_statement FP               │ 10        │ 1 (page 154) │ 0         │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ cash_flow FP                      │ 1         │ 0            │ 0         │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ balance_sheet missing             │ 0         │ 0            │ 0         │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ income_statement missing          │ 2         │ 0            │ 0         │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ cash_flow missing                 │ 2         │ 0            │ 0         │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ First page → LLM (balance_sheet)  │ 12        │ 61 (correct) │ 61        │
+  │                                   │ (wrong)   │              │           │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ First page → LLM                  │ 9 (wrong) │ 62 (correct) │ 62        │
+  │ (income_statement)                │           │              │           │
+  ├───────────────────────────────────┼───────────┼──────────────┼───────────┤
+  │ First page → LLM (cash_flow)      │ 36        │ 117          │ 117       │
+  │                                   │ (wrong)   │ (correct)    │           │
+  └───────────────────────────────────┴───────────┴──────────────┴───────────┘
+
+  The one remaining extra page (154 for income_statement) is a legitimate
+  standalone income statement page. It does not affect extraction since
+  select_pages() always sends page 62 (the minimum — consolidated primary).
+
+  Ready for your review and commit before proceeding to the parser step.
