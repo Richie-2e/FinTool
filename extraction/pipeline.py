@@ -11,6 +11,16 @@ Stage 4: chunk_document + build_faiss_index → chunks
 
 from __future__ import annotations
 
+import os
+
+# Must be set before any transformers import (triggered lazily by Stage 4's
+# sentence-transformers and by Docling's fallback path): transformers
+# auto-probes for TensorFlow, and the TensorFlow build installed on this
+# machine deadlocks/crashes in its bundled protobuf/abseil init. This project
+# only uses the PyTorch backend, so disabling the TF probe avoids the bug
+# entirely with no functional change.
+os.environ.setdefault("USE_TF", "0")
+
 import json
 import time
 from dataclasses import dataclass
@@ -63,7 +73,15 @@ class ExtractionPipeline:
         self,
         pdf_path: Path,
         output_dir: Optional[Path] = None,
+        doc_id: Optional[str] = None,
     ) -> PipelineResult:
+        """
+        doc_id : optional external identifier (e.g. assigned by the upload
+            endpoint). When supplied, it is the single authoritative id for
+            every stage of this run — parsing, LLM extraction, chunking, and
+            FAISS indexing all use it as-is. When omitted (standalone / CLI
+            usage), the parser self-derives one, matching prior behavior.
+        """
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
@@ -78,7 +96,7 @@ class ExtractionPipeline:
 
         # ── Stage 1: Parse ───────────────────────────────────────────────────
         _log("Stage 1/4: Parsing document...")
-        parse_result = parse_pdf(pdf_path)
+        parse_result = parse_pdf(pdf_path, doc_id=doc_id)
         doc_id = parse_result.doc_id
         stem   = pdf_path.stem
 

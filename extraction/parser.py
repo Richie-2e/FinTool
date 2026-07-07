@@ -1,8 +1,8 @@
 """
 parser.py
 Stage 1 — Raw document parsing.
-Tries Docling first, then pdfplumber, then pypdf (text-only).
-OCR via Docling's built-in pipeline is available as an optional 4th path.
+Tries PyMuPDF first, then Docling, then pdfplumber, then pypdf (text-only).
+OCR via Docling's built-in pipeline is available as an optional fallback path.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -43,12 +44,12 @@ class DoclingTable:
 
 @dataclass
 class DoclingParseResult:
-    doc_id: str                    # first 12 hex chars of md5(filename + file_size)
+    doc_id: str                    # caller-supplied id, or self-derived: first 12 hex chars of md5(filename + file_size)
     pdf_name: str
     page_count: int
     pages_raw_text: list[str]      # one string per page, index 0 = page 1
     tables: list[DoclingTable]
-    parser_used: str               # "docling" | "docling_ocr" | "pdfplumber" | "pypdf"
+    parser_used: str               # "pymupdf" | "docling" | "docling_ocr" | "pdfplumber" | "pypdf"
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,12 @@ def _make_doc_id(pdf_path: Path) -> str:
     stat = pdf_path.stat()
     raw = f"{pdf_path.name}{stat.st_size}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def _resolve_doc_id(pdf_path: Path, doc_id: Optional[str]) -> str:
+    """Use the caller-supplied doc_id when given; only self-derive for
+    standalone/CLI usage where no external identity exists yet."""
+    return doc_id if doc_id is not None else _make_doc_id(pdf_path)
 
 
 _STANDALONE_RE = re.compile(r"\bstandalone\b", re.IGNORECASE)
@@ -76,10 +83,40 @@ def _infer_section_hint(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Parser 1 — Docling (primary)
+# Parser 1 — PyMuPDF (primary)
 # ---------------------------------------------------------------------------
 
-def _parse_with_docling(pdf_path: Path, use_ocr: bool = False) -> DoclingParseResult:
+def _parse_with_pymupdf(pdf_path: Path, doc_id: Optional[str] = None) -> DoclingParseResult:
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(str(pdf_path))
+    page_count = doc.page_count
+    pages_raw_text = [page.get_text("text") for page in doc]
+    doc.close()
+
+    # No structured table extraction here: Stage 3 (extract_with_llm) consumes
+    # pages_raw_text only, so `tables` is left empty, matching the pypdf path.
+    tables: list[DoclingTable] = []
+
+    print(f"[parser] Used: pymupdf | pages: {page_count} | tables: 0")
+
+    return DoclingParseResult(
+        doc_id=_resolve_doc_id(pdf_path, doc_id),
+        pdf_name=pdf_path.name,
+        page_count=page_count,
+        pages_raw_text=pages_raw_text,
+        tables=tables,
+        parser_used="pymupdf",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parser 2 — Docling (fallback 1)
+# ---------------------------------------------------------------------------
+
+def _parse_with_docling(
+    pdf_path: Path, use_ocr: bool = False, doc_id: Optional[str] = None
+) -> DoclingParseResult:
     from docling.document_converter import DocumentConverter, PdfFormatOption  # type: ignore
     from docling.datamodel.base_models import InputFormat  # type: ignore
     from docling.datamodel.pipeline_options import PdfPipelineOptions  # type: ignore
@@ -170,7 +207,7 @@ def _parse_with_docling(pdf_path: Path, use_ocr: bool = False) -> DoclingParseRe
     print(f"[parser] Used: {parser_label} | pages: {page_count} | tables: {len(tables)}")
 
     return DoclingParseResult(
-        doc_id=_make_doc_id(pdf_path),
+        doc_id=_resolve_doc_id(pdf_path, doc_id),
         pdf_name=pdf_path.name,
         page_count=page_count,
         pages_raw_text=pages_raw_text,
@@ -180,10 +217,10 @@ def _parse_with_docling(pdf_path: Path, use_ocr: bool = False) -> DoclingParseRe
 
 
 # ---------------------------------------------------------------------------
-# Parser 2 — pdfplumber (fallback 1)
+# Parser 3 — pdfplumber (fallback 2)
 # ---------------------------------------------------------------------------
 
-def _parse_with_pdfplumber(pdf_path: Path) -> DoclingParseResult:
+def _parse_with_pdfplumber(pdf_path: Path, doc_id: Optional[str] = None) -> DoclingParseResult:
     import pdfplumber  # type: ignore
 
     pages_raw_text: list[str] = []
@@ -218,7 +255,7 @@ def _parse_with_pdfplumber(pdf_path: Path) -> DoclingParseResult:
     print(f"[parser] Used: pdfplumber | pages: {page_count} | tables: {len(tables)}")
 
     return DoclingParseResult(
-        doc_id=_make_doc_id(pdf_path),
+        doc_id=_resolve_doc_id(pdf_path, doc_id),
         pdf_name=pdf_path.name,
         page_count=page_count,
         pages_raw_text=pages_raw_text,
@@ -228,10 +265,10 @@ def _parse_with_pdfplumber(pdf_path: Path) -> DoclingParseResult:
 
 
 # ---------------------------------------------------------------------------
-# Parser 3 — pypdf (fallback 2, text-only)
+# Parser 4 — pypdf (fallback 3, text-only)
 # ---------------------------------------------------------------------------
 
-def _parse_with_pypdf(pdf_path: Path) -> DoclingParseResult:
+def _parse_with_pypdf(pdf_path: Path, doc_id: Optional[str] = None) -> DoclingParseResult:
     from pypdf import PdfReader  # type: ignore
 
     reader = PdfReader(str(pdf_path))
@@ -241,7 +278,7 @@ def _parse_with_pypdf(pdf_path: Path) -> DoclingParseResult:
     print(f"[parser] Used: pypdf (text-only) | pages: {page_count} | tables: 0")
 
     return DoclingParseResult(
-        doc_id=_make_doc_id(pdf_path),
+        doc_id=_resolve_doc_id(pdf_path, doc_id),
         pdf_name=pdf_path.name,
         page_count=page_count,
         pages_raw_text=pages_raw_text,
@@ -251,26 +288,34 @@ def _parse_with_pypdf(pdf_path: Path) -> DoclingParseResult:
 
 
 # ---------------------------------------------------------------------------
-# Parser 4 — Docling with OCR (fallback 3, scanned PDFs)
+# Parser 2b — Docling with OCR (scanned PDFs)
 # ---------------------------------------------------------------------------
 # Called automatically when Docling succeeds but yields no text at all
 # (likely a scanned document).  Can also be triggered explicitly.
 
-def _parse_with_docling_ocr(pdf_path: Path) -> DoclingParseResult:
-    return _parse_with_docling(pdf_path, use_ocr=True)
+def _parse_with_docling_ocr(pdf_path: Path, doc_id: Optional[str] = None) -> DoclingParseResult:
+    return _parse_with_docling(pdf_path, use_ocr=True, doc_id=doc_id)
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def parse_pdf(pdf_path: str | Path) -> DoclingParseResult:
+def parse_pdf(pdf_path: str | Path, doc_id: Optional[str] = None) -> DoclingParseResult:
     """
     Parse a PDF through the fallback chain:
-      1. Docling (primary)
-      2. Docling with OCR (if Docling returned blank pages — scanned doc)
-      3. pdfplumber
-      4. pypdf (text-only)
+      1. PyMuPDF (primary)
+      2. Docling (if PyMuPDF is unavailable/fails, or returns blank pages)
+      3. Docling with OCR (if Docling returned blank pages — scanned doc)
+      4. pdfplumber
+      5. pypdf (text-only)
+
+    doc_id : optional external identifier (e.g. assigned by the upload
+        endpoint). When supplied, every parser in the chain uses it as-is
+        instead of self-deriving one — the parser never recomputes or
+        overwrites an externally supplied identity. When omitted (standalone
+        / CLI usage), behavior is unchanged: each parser self-derives doc_id
+        from the file's name + size.
 
     Raises RuntimeError only if all parsers fail.
     """
@@ -278,18 +323,31 @@ def parse_pdf(pdf_path: str | Path) -> DoclingParseResult:
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    # ── Docling (primary) ──────────────────────────────────────────────────
+    # ── PyMuPDF (primary) ───────────────────────────────────────────────────
+    try:
+        result = _parse_with_pymupdf(pdf_path, doc_id=doc_id)
+        total_text = sum(len(t) for t in result.pages_raw_text)
+        if result.page_count > 0 and total_text == 0:
+            print("[parser] PyMuPDF returned empty text — falling back to Docling")
+        else:
+            return result
+    except ImportError:
+        print("[parser] PyMuPDF not available — falling back to Docling")
+    except Exception as e:
+        print(f"[parser] PyMuPDF failed ({e}) — falling back to Docling")
+
+    # ── Docling (fallback 1) ────────────────────────────────────────────────
     if not _docling_models_cached():
         print("[parser] Docling models not cached — falling back to pdfplumber. "
               "Run `docling-tools models download` once to enable Docling.")
     else:
         try:
-            result = _parse_with_docling(pdf_path, use_ocr=False)
+            result = _parse_with_docling(pdf_path, use_ocr=False, doc_id=doc_id)
             total_text = sum(len(t) for t in result.pages_raw_text)
             if result.page_count > 0 and total_text == 0:
                 print("[parser] Docling returned empty text — retrying with OCR")
                 try:
-                    return _parse_with_docling_ocr(pdf_path)
+                    return _parse_with_docling_ocr(pdf_path, doc_id=doc_id)
                 except Exception as ocr_err:
                     print(f"[parser] Docling OCR failed: {ocr_err}")
             else:
@@ -299,14 +357,14 @@ def parse_pdf(pdf_path: str | Path) -> DoclingParseResult:
         except Exception as e:
             print(f"[parser] Docling failed ({e}) — falling back to pdfplumber")
 
-    # ── pdfplumber (fallback 1) ────────────────────────────────────────────
+    # ── pdfplumber (fallback 2) ────────────────────────────────────────────
     try:
-        return _parse_with_pdfplumber(pdf_path)
+        return _parse_with_pdfplumber(pdf_path, doc_id=doc_id)
     except Exception as e:
         print(f"[parser] pdfplumber failed ({e}) — falling back to pypdf")
 
-    # ── pypdf (fallback 2, text-only) ─────────────────────────────────────
+    # ── pypdf (fallback 3, text-only) ─────────────────────────────────────
     try:
-        return _parse_with_pypdf(pdf_path)
+        return _parse_with_pypdf(pdf_path, doc_id=doc_id)
     except Exception as e:
         raise RuntimeError(f"All parsers failed for {pdf_path}: {e}") from e

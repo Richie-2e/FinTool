@@ -109,6 +109,7 @@ def run_extraction_pipeline(self, doc_id: str, pdf_path: str) -> None:  # noqa: 
         result = ExtractionPipeline().run(
             Path(pdf_path),
             output_dir=OUTPUT_DIR / doc_id,
+            doc_id=doc_id,
         )
 
         # ── Stage 2: Compute ratios ──────────────────────────────────────────

@@ -11,10 +11,13 @@ extraction_outputs/
 # Scratch notebooks
 *.ipynb
 
+
 # Scratch files
 file.txt
 file2.md
 files3.md
+*.md
+*.txt
 
 # Python
 __pycache__/
