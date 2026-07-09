@@ -50,7 +50,7 @@ CANONICAL_METRICS: dict[str, dict] = {
         "statement": "income_statement",
         "patterns": [
             r"^gross profit$",
-            r"^gross profit/(loss)$",
+            r"^gross profit/\(loss\)$",
         ],
         "xbrl_tags": ["GrossProfit"],
         "exclude": [r"margin", r"%", r"higher by", r"previous year"],

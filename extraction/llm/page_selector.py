@@ -4,8 +4,8 @@ Page selection policy for LLM-based extraction (Fix 2 logic).
 
 Responsibilities:
   - Given classifier output, find which pages belong to each statement type
-  - Apply the selection policy: primary page only for balance_sheet and
-    income_statement; primary + continuation for cash_flow
+  - Apply the selection policy: highest-scoring page only for balance_sheet
+    and income_statement; highest-scoring page + continuation for cash_flow
   - Concatenate selected page text up to MAX_CHARS_PER_CALL
 
 Selection policy rationale (from PoC benchmarking Fix 2):
@@ -14,8 +14,13 @@ Selection policy rationale (from PoC benchmarking Fix 2):
   - For cash_flow, the financing activities section and closing cash balance
     appear on the page immediately following the statement title page, without
     a statement title of their own. That continuation page must be included.
-  - For balance_sheet and income_statement, the primary classified page
-    contains all required data.
+  - For balance_sheet and income_statement, a single well-chosen page
+    contains all required data — "well-chosen" means the highest-scoring
+    page per classifier.PageClassification.score (see classifier.py), not
+    simply the first one classified. The classifier's title/density gates
+    can still produce false positives (e.g. a narrative page that mentions
+    a statement keyword, or a Notes sub-heading); picking by score rather
+    than page order is what makes selection resilient to those.
 """
 
 from __future__ import annotations
@@ -31,9 +36,13 @@ def select_pages(
     """
     Return the effective page numbers to send to the LLM for `stmt_type`.
 
-    For balance_sheet and income_statement: only the first classified page.
-    For cash_flow: the first classified page plus the immediately following
+    For balance_sheet and income_statement: only the highest-scoring
+    classified page (see classifier.PageClassification.score). For
+    cash_flow: the highest-scoring page plus the immediately following
     page (which contains financing activities without its own title).
+
+    Ties (equal score) are broken by page order — the earliest page wins —
+    for full determinism.
 
     Parameters
     ----------
@@ -48,16 +57,13 @@ def select_pages(
         Page numbers (1-indexed) to include in the LLM context.
         Empty list if no pages of this type were classified.
     """
-    matching = sorted(
-        pc.page_no
-        for pc in page_classes
-        if pc.statement_type == stmt_type
-    )
+    matching = [pc for pc in page_classes if pc.statement_type == stmt_type]
 
     if not matching:
         return []
 
-    primary = matching[0]
+    best = max(matching, key=lambda pc: (pc.score, -pc.page_no))
+    primary = best.page_no
 
     if stmt_type == "cash_flow":
         return [primary, primary + 1]

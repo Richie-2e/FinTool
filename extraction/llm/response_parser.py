@@ -24,6 +24,9 @@ from extraction.metric_extractor import CandidateMetric, parse_value
 # Confidence values the LLM is instructed to use
 _VALID_CONFIDENCE = {"high", "medium", "low"}
 
+# Section types the LLM is instructed to use
+_VALID_SECTION_TYPES = {"consolidated", "standalone", "unknown"}
+
 
 def parse_response(
     raw_result: dict,
@@ -81,9 +84,10 @@ def parse_response(
         # Use the classifier's section_type — it reads the actual page header.
         # The LLM's section_type guess is ignored; it's only present in the
         # output schema so the model has context, not because we trust it.
-        resolved_section = section_type if section_type != "unknown" else (
-            entry.get("section_type", "unknown")
-        )
+        llm_section = entry.get("section_type", "unknown")
+        if llm_section not in _VALID_SECTION_TYPES:
+            llm_section = "unknown"
+        resolved_section = section_type if section_type != "unknown" else llm_section
 
         candidates.append(CandidateMetric(
             doc_id=doc_id,
@@ -97,6 +101,7 @@ def parse_response(
             section_type=resolved_section,
             confidence=confidence,
             source="llm_extraction",
+            evidence=str(entry.get("evidence", ""))[:200],
         ))
 
     return candidates

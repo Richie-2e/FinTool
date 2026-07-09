@@ -18,6 +18,9 @@ Public API
 
 from __future__ import annotations
 
+import re
+from typing import Optional
+
 from extraction.canonical_metrics import CANONICAL_METRICS
 
 
@@ -43,6 +46,106 @@ _CANONICAL_BY_TYPE: dict[str, list[str]] = {
 
 
 # ---------------------------------------------------------------------------
+# Synonym hints — rendered from canonical_metrics.py's regex patterns
+# ---------------------------------------------------------------------------
+# canonical_metrics.py remains the single source of truth for alias
+# knowledge. This section only *renders* that existing data as prompt text;
+# it never introduces a second alias list. The patterns are regexes (used
+# for label matching elsewhere), so converting them to human-readable text
+# requires a defensive cleaner: known regex syntax (anchors, escaped parens,
+# the "long.?term" optional-separator construct) is converted to plain text;
+# anything else is left unrendered rather than emitted as garbled regex.
+
+_MAX_SYNONYMS_PER_METRIC = 3
+
+# Characters that indicate unhandled regex syntax after the known
+# substitutions have been applied. A pattern containing any of these post-
+# cleaning is skipped rather than rendered partially cleaned.
+_UNSUPPORTED_REGEX_CHARS = set("^$*+[]{}|\\")
+
+
+def _clean_pattern(pattern: str) -> Optional[str]:
+    """
+    Convert a canonical_metrics.py regex pattern into plain text, or return
+    None if it uses regex syntax this cleaner doesn't know how to render.
+    """
+    s = pattern
+    if s.startswith("^"):
+        s = s[1:]
+    if s.endswith("$"):
+        s = s[:-1]
+    s = s.replace(r"\(", "(").replace(r"\)", ")")
+    s = s.replace(".?", " ")  # optional separator, e.g. "long.?term" -> "long term"
+    s = re.sub(r"\s+", " ", s).strip()
+
+    if any(ch in _UNSUPPORTED_REGEX_CHARS for ch in s):
+        return None
+    if "." in s:  # stray wildcard not covered by the substitution above
+        return None
+    return s
+
+
+def _normalize_for_compare(s: str) -> str:
+    return re.sub(r"[-\s]+", " ", s).strip().lower()
+
+
+def _is_identity_alias(cleaned: str, metric_name: str) -> bool:
+    """True if `cleaned` is just the canonical name with underscores->spaces
+    (allowing for hyphen/space variation), i.e. it adds no new information."""
+    return _normalize_for_compare(cleaned) == _normalize_for_compare(
+        metric_name.replace("_", " ")
+    )
+
+
+def _render_metric_hints(metric_name: str, patterns: list[str]) -> Optional[str]:
+    """Return 'metric_name: alias1, alias2, alias3' or None if no usable
+    non-identity aliases remain after cleaning."""
+    aliases: list[str] = []
+    seen_normalized: set[str] = set()
+
+    for pattern in patterns:
+        cleaned = _clean_pattern(pattern)
+        if cleaned is None:
+            continue
+        if _is_identity_alias(cleaned, metric_name):
+            continue
+        norm = _normalize_for_compare(cleaned)
+        if norm in seen_normalized:
+            continue
+        seen_normalized.add(norm)
+        aliases.append(cleaned)
+        if len(aliases) == _MAX_SYNONYMS_PER_METRIC:
+            break
+
+    if not aliases:
+        return None
+    return f"{metric_name}: {', '.join(aliases)}"
+
+
+def _build_synonym_hint_block(stmt_type: str) -> str:
+    lines: list[str] = []
+    for name in _CANONICAL_BY_TYPE.get(stmt_type, []):
+        hint_line = _render_metric_hints(name, CANONICAL_METRICS[name]["patterns"])
+        if hint_line:
+            lines.append(f"- {hint_line}")
+
+    if not lines:
+        return ""
+    return (
+        "Common label variants for some metrics (for matching only — "
+        "always use the canonical_name from the list above, never a variant):\n"
+        + "\n".join(lines)
+    )
+
+
+# Precomputed once at import time (same pattern as _CANONICAL_BY_TYPE) — no
+# per-call cost in build_user_prompt().
+_SYNONYM_HINTS_BY_TYPE: dict[str, str] = {
+    stmt: _build_synonym_hint_block(stmt) for stmt in _CANONICAL_BY_TYPE
+}
+
+
+# ---------------------------------------------------------------------------
 # JSON output schema (shared across all prompts)
 # ---------------------------------------------------------------------------
 
@@ -52,7 +155,7 @@ Output schema:
   "metrics": [
     {
       "canonical_name": "<name from canonical list>",
-      "raw_label": "<exact label as it appears in text>",
+      "raw_label": "<copied verbatim, character-for-character, from the DOCUMENT TEXT below -- NEVER from the canonical name list or the label-variant hints, even if one of them looks similar>",
       "value": <float or null>,
       "unit": "<INR Crore / INR Lakh / USD Million / etc>",
       "year": <integer YYYY or null>,
@@ -184,13 +287,17 @@ def get_system_prompt(stmt_type: str) -> str:
 def build_user_prompt(stmt_type: str, text_block: str) -> str:
     """
     Build the user-turn message for a given statement type and page text.
-    Includes only the canonical names relevant to that statement type.
+    Includes only the canonical names relevant to that statement type, plus
+    a bounded set of label-variant hints rendered from canonical_metrics.py.
     """
     canonical_list = ", ".join(_CANONICAL_BY_TYPE.get(stmt_type, []))
+    hints = _SYNONYM_HINTS_BY_TYPE.get(stmt_type, "")
+    hints_block = f"\n\n{hints}" if hints else ""
     return (
         f"Statement type: {stmt_type}\n\n"
         f"Canonical metric names you may use (use ONLY these):\n"
-        f"{canonical_list}\n\n"
+        f"{canonical_list}"
+        f"{hints_block}\n\n"
         f"--- DOCUMENT TEXT ---\n"
         f"{text_block}\n"
         f"--- END OF TEXT ---\n\n"

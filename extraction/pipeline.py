@@ -119,7 +119,7 @@ class ExtractionPipeline:
         # ── Stage 3: Metric extraction ───────────────────────────────────────
         _log("Stage 3/4: Extracting metrics...")
         pages = {i + 1: text for i, text in enumerate(parse_result.pages_raw_text)}
-        candidates = extract_with_llm(pages, page_classes, doc_id)
+        candidates, validator_diagnostics = extract_with_llm(pages, page_classes, doc_id)
         _log(f"  LLM extraction candidates: {len(candidates)}")
 
         if len(candidates) < 3:
@@ -179,6 +179,27 @@ class ExtractionPipeline:
         # ── Save outputs ─────────────────────────────────────────────────────
         resolved_df.to_csv(output_dir / f"{stem}_resolved_metrics.csv", index=False)
         pivot_df.to_csv(output_dir / f"{stem}_pivot_metrics.csv", index=False)
+
+        rejected_diagnostics = [d for d in validator_diagnostics if d.rejection_reasons]
+        rejections_df = pd.DataFrame([
+            {
+                "doc_id": d.doc_id,
+                "statement_type": d.statement_type,
+                "metric_name": d.metric_name,
+                "raw_label": d.raw_label,
+                "value": d.value,
+                "unit": d.unit,
+                "year": d.year,
+                "evidence": d.evidence,
+                "rejection_reason": "; ".join(d.rejection_reasons),
+            }
+            for d in rejected_diagnostics
+        ], columns=[
+            "doc_id", "statement_type", "metric_name", "raw_label",
+            "value", "unit", "year", "evidence", "rejection_reason",
+        ])
+        rejections_df.to_csv(output_dir / f"{stem}_validator_rejections.csv", index=False)
+        _log(f"  Validator rejections: {len(rejected_diagnostics)} of {len(validator_diagnostics)} candidates")
 
         with open(output_dir / f"{stem}_quality_report.json", "w", encoding="utf-8") as fh:
             json.dump(quality, fh, indent=2, default=str)

@@ -75,6 +75,7 @@ class CandidateMetric:
     section_type:   str
     confidence:     str   # "high" | "medium" | "low" | "derived"
     source:         str   # "docling_table" | "line_parse_fallback"
+    evidence:       str = ""   # verbatim source snippet (LLM path only); default keeps all other call sites valid
 
 
 # ---------------------------------------------------------------------------

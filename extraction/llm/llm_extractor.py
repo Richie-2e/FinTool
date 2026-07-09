@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from extraction.classifier import PageClassification
 from extraction.metric_extractor import CandidateMetric
+from extraction.llm.candidate_validator import RejectionRecord, validate_candidates
 from extraction.llm.ollama_client import call_ollama
 from extraction.llm.page_selector import get_page_block, select_pages
 from extraction.llm.prompts import build_user_prompt, get_system_prompt
@@ -33,10 +34,10 @@ def extract_with_llm(
     pages: dict[int, str],
     page_classes: list[PageClassification],
     doc_id: str,
-) -> list[CandidateMetric]:
+) -> tuple[list[CandidateMetric], list[RejectionRecord]]:
     """
-    Run LLM-based extraction for all three statement types and return a
-    combined list of CandidateMetric objects.
+    Run LLM-based extraction for all three statement types and return the
+    validated candidates plus per-candidate validator diagnostics.
 
     Parameters
     ----------
@@ -53,15 +54,21 @@ def extract_with_llm(
 
     Returns
     -------
-    list[CandidateMetric]
-        All extracted metrics across balance_sheet, income_statement, and
-        cash_flow. May contain multiple entries for the same (metric_name, year)
-        pair — resolution is handled downstream by build_resolved_metrics_df().
+    (candidates, diagnostics)
+        candidates  : list[CandidateMetric] -- only candidates that passed
+            L2/L4/L5 validation, across balance_sheet, income_statement, and
+            cash_flow. May contain multiple entries for the same
+            (metric_name, year) pair — resolution is handled downstream by
+            build_resolved_metrics_df().
+        diagnostics : list[RejectionRecord] -- one entry per candidate seen
+            (accepted or not) across all three statement-type calls, for
+            persistence to validator_rejections.csv by the caller.
     """
     page_class_map: dict[int, PageClassification] = {
         pc.page_no: pc for pc in page_classes
     }
     candidates: list[CandidateMetric] = []
+    all_diagnostics: list[RejectionRecord] = []
 
     for stmt_type in _STATEMENT_TYPES:
         effective_pages = select_pages(page_classes, stmt_type)
@@ -105,6 +112,15 @@ def extract_with_llm(
             f"  [llm] {stmt_type}: {len(new_candidates)} candidates "
             f"in {latency:.1f}s ({status})"
         )
-        candidates.extend(new_candidates)
 
-    return candidates
+        accepted, diagnostics = validate_candidates(new_candidates, text_block)
+        rejected_count = len(new_candidates) - len(accepted)
+        if rejected_count:
+            print(
+                f"  [validator] {stmt_type}: rejected {rejected_count} of "
+                f"{len(new_candidates)} candidates (L2/L4/L5)"
+            )
+        candidates.extend(accepted)
+        all_diagnostics.extend(diagnostics)
+
+    return candidates, all_diagnostics
