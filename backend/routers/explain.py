@@ -11,7 +11,6 @@ from backend.exceptions import APIError
 from backend.models.db import ComputedMetric, ResolvedMetric, get_db
 from backend.models.schemas import ExplainInput, ExplainResponse, RiskClassification
 from backend.routers.metrics import (
-    CASHFLOW_THRESHOLD,
     DEBT_THRESHOLD,
     LIQUIDITY_THRESHOLD,
     PROFITABILITY_THRESHOLD,
@@ -21,11 +20,16 @@ from backend.routers.metrics import (
 router = APIRouter()
 
 # Maps computed ratio name → (risk_type label, ComputedMetric column name, threshold string)
+#
+# operating_cash_flow is deliberately absent: it is a raw resolved metric, not
+# a computed ratio, so it never appears as a ratio_name in provenance.json —
+# metric_name lookup against prov_index always 404s before this map is
+# consulted, making that branch unreachable. Cashflow risk remains visible
+# via GET /risks.
 _METRIC_RISK_MAP: dict[str, tuple[str, str, str]] = {
-    "current_ratio":       ("liquidity",     "liquidity_risk",     LIQUIDITY_THRESHOLD),
-    "debt_to_equity":      ("debt",          "debt_risk",          DEBT_THRESHOLD),
-    "profit_margin":       ("profitability", "profitability_risk", PROFITABILITY_THRESHOLD),
-    "operating_cash_flow": ("cashflow",      "cashflow_risk",      CASHFLOW_THRESHOLD),
+    "current_ratio":  ("liquidity",     "liquidity_risk",     LIQUIDITY_THRESHOLD),
+    "debt_to_equity": ("debt",          "debt_risk",          DEBT_THRESHOLD),
+    "profit_margin":  ("profitability", "profitability_risk", PROFITABILITY_THRESHOLD),
 }
 
 
