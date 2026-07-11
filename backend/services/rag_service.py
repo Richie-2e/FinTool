@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-import anthropic
+from google import genai
+from google.genai import errors as genai_errors
 
-from backend.config import ANTHROPIC_API_KEY, EMBED_MODEL, LLM_MODEL
+from backend.config import EMBED_MODEL, GEMINI_API_KEY, LLM_MODEL
 from extraction.text_chunker import TextChunk, load_faiss_index, search_chunks
 
 # ---------------------------------------------------------------------------
@@ -143,33 +144,41 @@ def build_grounded_prompt(
 
 
 # ---------------------------------------------------------------------------
-# call_claude
+# call_llm
 # ---------------------------------------------------------------------------
 
-def call_claude(
+def call_llm(
     prompt: str,
     conversation_history: list[dict] | None = None,
 ) -> str:
-    """Call the Claude API with the grounded prompt. Returns the response text."""
-    if not ANTHROPIC_API_KEY:
+    """Call the Gemini API with the grounded prompt. Returns the response text."""
+    if not GEMINI_API_KEY:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Add it to your .env file or environment."
+            "GEMINI_API_KEY is not set. Add it to your .env file or environment."
         )
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
-    messages: list[dict] = list(conversation_history or [])
-    messages.append({"role": "user", "content": prompt})
+    # Anthropic-style {"role": "user"/"assistant", "content": ...} turns,
+    # translated to Gemini's {"role": "user"/"model", "parts": [{"text": ...}]}.
+    contents: list[dict] = [
+        {
+            "role": "model" if turn["role"] == "assistant" else "user",
+            "parts": [{"text": turn["content"]}],
+        }
+        for turn in (conversation_history or [])
+    ]
+    contents.append({"role": "user", "parts": [{"text": prompt}]})
 
     try:
-        response = client.messages.create(
+        response = client.models.generate_content(
             model=LLM_MODEL,
-            max_tokens=1000,
-            messages=messages,
+            contents=contents,
         )
-    except anthropic.AuthenticationError:
+    except genai_errors.ClientError as exc:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is invalid or expired. Update it in your .env file."
+            f"GEMINI_API_KEY is invalid or expired, or the request was rejected "
+            f"({exc.code}): {exc.message}"
         )
-    except anthropic.APIError as exc:
-        raise RuntimeError(f"Claude API error ({exc.status_code}): {exc.message}")
-    return response.content[0].text
+    except genai_errors.APIError as exc:
+        raise RuntimeError(f"Gemini API error ({exc.code}): {exc.message}")
+    return response.text

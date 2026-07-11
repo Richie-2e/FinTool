@@ -27,7 +27,7 @@ celery>=5.3.0
 redis>=5.0.0
 
 # LLM
-anthropic>=0.28.0
+google-genai>=1.0.0
 
 # Evaluation
 ragas>=0.1.0

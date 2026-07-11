@@ -10,7 +10,7 @@ from backend.exceptions import APIError
 from backend.models.db import ComputedMetric, get_db
 from backend.models.schemas import ChatRequest, ChatResponse, MetricUsed, SourceItem
 from backend.routers.metrics import _get_ready_doc
-from backend.services.rag_service import build_grounded_prompt, build_rag_context, call_claude
+from backend.services.rag_service import build_grounded_prompt, build_rag_context, call_llm
 
 router = APIRouter()
 
@@ -146,7 +146,7 @@ def post_chat(req: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     )
 
     history = [{"role": t.role, "content": t.content} for t in req.conversation_history]
-    answer  = call_claude(prompt, conversation_history=history)
+    answer  = call_llm(prompt, conversation_history=history)
 
     # Post-process
     sources      = [SourceItem(**s) for s in rag_context["sources"]]
