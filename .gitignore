@@ -19,6 +19,12 @@ files3.md
 *.md
 *.txt
 
+!docs/API.md
+!docs/FRONTEND_GUIDE.md
+!docs/ARCHITECTURE.md
+!PROJECT_STATUS.md
+!frontend/README.md
+
 # Python
 __pycache__/
 *.pyc
@@ -32,5 +38,6 @@ venv/
 .DS_Store
 
 .env.example
+!frontend/.env.example
 
 *.db
