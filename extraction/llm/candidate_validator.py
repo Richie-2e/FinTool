@@ -70,6 +70,147 @@ def _normalize_for_grounding(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Evidence layout normalization
+#
+# Fixes a specific, benchmark-confirmed defect: for cash_flow candidates,
+# the LLM sometimes emits `evidence` as a single line fusing the label and
+# its trailing value(s) with a colon or plain whitespace (e.g.
+# "Net cash from/(used in) operating activities: 23,879.91") instead of the
+# newline-separated, multi-fragment layout it reliably produces for
+# balance_sheet/income_statement. Because the fused string then classifies
+# as one "text" fragment, L4's ordered search requires the ENTIRE string --
+# including the trailing number, in whatever exact formatting the model
+# chose -- to match verbatim in the source text_block, which is far more
+# brittle than L5's own tolerant, source-derived value check. Splitting the
+# label from its trailing value restores the intended division of labor:
+# L4 verifies the label, L5 (independently, from the real text_block) finds
+# the value. See the frozen design review for the full rationale,
+# including why the decimal-or-comma safeguard below is not loosened to a
+# bare digit-count rule, and why a hyphenated fiscal-year range (e.g.
+# "2023-24") or a glued reference code (e.g. "F95") must never be
+# misread as -- or absorbed into -- the trailing value.
+# ---------------------------------------------------------------------------
+
+# The gap that may sit between two adjacent numeric tokens already
+# identified as part of the same trailing run (e.g. the ", " in
+# "(2,314.03), 27,324.93", or the plain " " in "5,569.74 7,212.64").
+# Deliberately narrow: this only judges the gap BETWEEN two already-matched
+# _NUMBER_RE tokens, never characters inside a number.
+_RUN_GAP_RE = re.compile(r"[,\s]+")
+
+
+def _looks_like_financial_figure(token: str) -> bool:
+    """
+    True if `token` (a _NUMBER_RE match) contains a decimal point or a
+    thousands-comma. Every real fused trailing value observed in the
+    benchmark corpus (23,879.91; (2,314.03); 27,324.93; 9,280.88; 5,569.74;
+    7,212.64; 73.35; 37.45; 17,413.47; 7,345.57) satisfies this; every real
+    bare note/section reference observed (24, 95, (A), (1)) does not.
+    Deliberately conservative and NOT loosened to a digit-count rule: an
+    integer-only fused value (not observed in this corpus) would be a
+    false negative, but a false negative only leaves a candidate exactly as
+    rejected as it is today -- never a new false accept. A digit-count
+    rule would reopen a worse false-positive risk (a bare 4-digit fiscal
+    year like "2025" would qualify), per the design review.
+    """
+    return "." in token or "," in token
+
+
+def _is_glued_to_preceding_content(s: str, start: int) -> bool:
+    """
+    True if treating the _NUMBER_RE match starting at `start` as a
+    standalone value would be wrong because it is actually a fragment of
+    something else glued directly (no separator) to what precedes it:
+    a note/section reference glued to a letter (the "95" inside "F95"), or
+    the second half of a hyphenated fiscal-year range glued to a digit
+    (the "-24" inside "2023-24" -- a bare sign _NUMBER_RE itself would
+    otherwise consume as a genuine negative sign). A token preceded by
+    nothing (string start) or by a genuine separator (whitespace, comma,
+    colon, '(') is never glued.
+    """
+    if start == 0:
+        return False
+    prev = s[start - 1]
+    if prev.isalnum():
+        return True
+    if prev in "-−" and start - 1 > 0 and s[start - 2].isalnum():
+        return True
+    return False
+
+
+def _normalize_evidence_layout(evidence: str) -> str:
+    """
+    Insert a single newline at a fused label/value boundary in a raw
+    evidence string, so the unchanged _split_evidence_fragments /
+    _classify_fragment / L4 / L5 pipeline can treat the label and its
+    trailing value(s) as separate fragments -- exactly as it already does
+    for evidence the LLM formats with real newlines.
+
+    Rule: if the string ends in a run of one or more _NUMBER_RE tokens
+    (adjacent through nothing but a comma/whitespace gap), at least one of
+    which contains '.' or ',', preceded by text containing at least one
+    letter, a single newline is inserted at that boundary. At most one
+    trailing colon (plus surrounding whitespace) immediately before the
+    boundary is dropped rather than preserved: confirmed against real
+    source text (TataSteel p.286) that this colon is a model-inserted
+    artifact, not verbatim source content -- dropping it is safe either
+    way, since a fragment without it still matches as a prefix of the
+    source line whether or not the source itself has a colon there.
+
+    Never fires (returns the input unchanged) if: the boundary is already
+    newline-separated (idempotent by construction); no qualifying trailing
+    run exists; the run would consume the whole string; the remaining
+    prefix has no letters; or a token only reaches the boundary by being
+    glued to preceding letters/digits (see _is_glued_to_preceding_content).
+    Never deletes or reorders any character other than the one
+    narrowly-scoped colon substitution described above.
+    """
+    stripped = evidence.rstrip()
+    if not stripped:
+        return evidence
+
+    candidates = [
+        m for m in _NUMBER_RE.finditer(stripped)
+        if not _is_glued_to_preceding_content(stripped, m.start())
+    ]
+    if not candidates or candidates[-1].end() != len(stripped):
+        return evidence
+
+    # Extend backward through remaining candidates while each pair is
+    # adjacent through nothing but a comma/whitespace gap.
+    run_start_idx = len(candidates) - 1
+    for i in range(len(candidates) - 2, -1, -1):
+        gap = stripped[candidates[i].end():candidates[run_start_idx].start()]
+        if gap and _RUN_GAP_RE.fullmatch(gap):
+            run_start_idx = i
+        else:
+            break
+
+    run = candidates[run_start_idx:]
+    if not any(_looks_like_financial_figure(m.group()) for m in run):
+        return evidence
+
+    run_start = run[0].start()
+    if run_start == 0:
+        return evidence
+
+    prefix = stripped[:run_start]
+    prefix_trimmed = prefix.rstrip()
+    if prefix_trimmed.endswith(":"):
+        prefix_trimmed = prefix_trimmed[:-1].rstrip()
+
+    if not prefix_trimmed or not any(c.isalpha() for c in prefix_trimmed):
+        return evidence
+
+    separator_zone = stripped[len(prefix_trimmed):run_start]
+    if _NEWLINE_RE.search(separator_zone):
+        return evidence
+
+    trailing_ws = evidence[len(stripped):]
+    return prefix_trimmed + "\n" + stripped[run_start:] + trailing_ws
+
+
+# ---------------------------------------------------------------------------
 # Evidence-fragment parsing
 # ---------------------------------------------------------------------------
 
@@ -245,7 +386,9 @@ def check_evidence_grounding(evidence: str, text_block: str) -> EvidenceGroundin
 
     Orchestrates, within L4 only (no L5, no multi-candidate/L2 orchestration
     -- that is a later stage):
-      1. Split `evidence` into fragments (Stage 1: _split_evidence_fragments).
+      1. Normalize a fused label/value layout, if present (
+         _normalize_evidence_layout), then split `evidence` into fragments
+         (Stage 1: _split_evidence_fragments).
       2. Classify each fragment; keep only "text" fragments as the ordered-
          search anchors (Stage 1: _classify_fragment). Numeric fragments are
          not required to match here -- grounding the candidate's declared
@@ -272,7 +415,7 @@ def check_evidence_grounding(evidence: str, text_block: str) -> EvidenceGroundin
     -------
     EvidenceGroundingResult
     """
-    fragments = _split_evidence_fragments(evidence)
+    fragments = _split_evidence_fragments(_normalize_evidence_layout(evidence))
     text_fragments = [f for f in fragments if _classify_fragment(f) == "text"]
 
     normalized_text_block = _normalize_for_grounding(text_block)

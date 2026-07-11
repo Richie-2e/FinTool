@@ -252,6 +252,8 @@ def _detect_company_name(pages_raw_text: list[str]) -> str:
     Skip lines that look like dates, addresses, or BSE/NSE boilerplate.
     """
     import re
+    from collections import Counter
+
     _SKIP_RE = re.compile(
         r"(bse|nse|bombay stock|national stock|dalal|phiroze|sebi|"
         r"limited liability|cin\s*:|gstin|pan\s*:|website|www\.|"
@@ -262,6 +264,43 @@ def _detect_company_name(pages_raw_text: list[str]) -> str:
         re.IGNORECASE,
     )
 
+    # ── Pass 1: company-suffix vote ─────────────────────────────────────────
+    # The reporting company's own name reliably recurs across the cover
+    # letter (subject line, signature block, letterhead), while other
+    # "X Limited" entities incidentally mentioned once — registrars,
+    # depositories, other stock exchanges — do not. Exchange names
+    # themselves (BSE/NSE) are already excluded by _SKIP_RE above, so the
+    # remaining "Limited"/"Ltd" lines are the reporting company plus at
+    # most a handful of one-off registrar/depository mentions.
+    _SUFFIX_RE = re.compile(r"\blimited\b|\bltd\.?\b", re.IGNORECASE)
+    _SIGNOFF_PREFIX_RE = re.compile(r"^(for and on behalf of|for)\s+", re.IGNORECASE)
+
+    votes: Counter[str] = Counter()
+    for page_text in pages_raw_text[:3]:
+        for raw_line in page_text.splitlines():
+            line = raw_line.strip()
+            if not (5 < len(line) <= 80):
+                continue
+            if _SKIP_RE.search(line):
+                continue
+            if not _SUFFIX_RE.search(line):
+                continue
+            # A genuine company name starts with an uppercase letter; a
+            # lowercase-leading candidate is almost always a PDF font/ligature
+            # decode glitch on a stylised logo (observed on real corpus PDFs).
+            if not line[:1].isupper():
+                continue
+            candidate = _SIGNOFF_PREFIX_RE.sub("", line).strip()
+            votes[candidate] += 1
+
+    if votes:
+        max_count = max(votes.values())
+        top = [name for name, count in votes.items() if count == max_count]
+        # Tie-break: shortest candidate — prefers the bare company name over
+        # a full sentence that merely contains it (e.g. a "Sub:" line).
+        return min(top, key=len)
+
+    # ── Pass 2 (fallback): generic title/upper-case heuristic ──────────────
     for page_text in pages_raw_text[:3]:
         for line in page_text.splitlines():
             line = line.strip()

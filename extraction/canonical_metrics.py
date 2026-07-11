@@ -82,6 +82,7 @@ CANONICAL_METRICS: dict[str, dict] = {
             r"^profit \(loss\) for the year$",
             r"^loss for the year$",
             r"^profit after tax for the year$",
+            r"^net profit attributable to:?$",
         ],
         "xbrl_tags": ["NetIncomeLoss"],
         "exclude": [r"margin", r"net profit margin", r"%", r"higher by", r"previous year"],
@@ -207,7 +208,7 @@ CANONICAL_METRICS: dict[str, dict] = {
             r"^net cash flow from operating activities$",
             r"^cash flows from operating activities$",
             r"^net cash from/\(used in\) operating activities$",
-            r"^net cash generated from /\(used in\) operating activities$",
+            r"^net cash generated from(?: /\(used in\))? operating activities$",
             r"^net cash provided by operating activities$",
         ],
         "xbrl_tags": ["NetCashProvidedByUsedInOperatingActivities"],
@@ -221,6 +222,7 @@ CANONICAL_METRICS: dict[str, dict] = {
             r"^net cash generated from /\(used in\) investing activities$",
             r"^net cash used in investing activities$",
             r"^cash flows from investing activities$",
+            r"^net cash inflow\s*/\s*\(used in\) investing activities$",
         ],
         "xbrl_tags": ["NetCashProvidedByUsedInInvestingActivities"],
         "exclude": [],
@@ -230,7 +232,7 @@ CANONICAL_METRICS: dict[str, dict] = {
         "patterns": [
             r"^net cash from financing activities$",
             r"^net cash from/\(used in\) financing activities$",
-            r"^net cash generated from /\(used in\) financing activities$",
+            r"^net cash generated from(?: /\(used in\))? financing activities$",
             r"^net cash used in financing activities$",
             r"^cash flows from financing activities$",
         ],
@@ -297,13 +299,23 @@ YEAR_RE = re.compile(r"\b(20\d{2})\b")
 # match_metric
 # ---------------------------------------------------------------------------
 
+# A trailing single-letter parenthetical note/column reference, e.g. the
+# "(A)" / "(B)" / "(C)" suffixes Indian cash-flow statements append to
+# sub-total lines ("Net Cash generated from Financing Activities (C)").
+# Deliberately narrow: exactly one letter between the parens, anchored at
+# the end of the string, so multi-word parentheticals like "(loss)" or
+# "(used in)" are never touched.
+_TRAILING_NOTE_REF_RE = re.compile(r"\s*\([a-z]\)$")
+
+
 def match_metric(label: str, statement_type: str | None = None) -> str | None:
     """
     Returns the canonical metric name for `label`, or None if no match.
 
     Steps:
       1. Normalise label (strip, collapse whitespace, lowercase).
-      2. For each candidate metric (filtered by statement_type when given):
+      2. Strip a trailing single-letter note reference, if present.
+      3. For each candidate metric (filtered by statement_type when given):
          a. If any exclude pattern matches → skip this metric.
          b. If any pattern matches → return the metric name.
     """
@@ -311,6 +323,7 @@ def match_metric(label: str, statement_type: str | None = None) -> str | None:
         return None
 
     normalised = re.sub(r"\s+", " ", label.strip().lower())
+    normalised = _TRAILING_NOTE_REF_RE.sub("", normalised)
 
     for metric_name, spec in CANONICAL_METRICS.items():
         if statement_type and spec["statement"] != statement_type:

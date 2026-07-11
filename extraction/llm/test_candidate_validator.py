@@ -31,6 +31,7 @@ from extraction.llm.candidate_validator import (
     _OrderedSearchResult,
     _classify_fragment,
     _construct_grounded_region,
+    _normalize_evidence_layout,
     _normalize_for_grounding,
     _numbers_in,
     _ordered_fragment_search,
@@ -795,6 +796,240 @@ class TestValidateCandidates(unittest.TestCase):
         self.assertEqual(d.raw_label, "Revenue from operations")
         self.assertEqual(d.value, 132516.66)
         self.assertEqual(d.year, 2025)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_evidence_layout() -- cash-flow evidence-format fix
+#
+# Real page text captured from extraction.parser.parse_pdf(), same style as
+# the fixtures above. Sourced from the exact pages the Benchmark V2 rejected
+# cash_flow candidates came from (TataSteel p.286, LICHSGFIN p.339/p.340).
+# ---------------------------------------------------------------------------
+
+TATASTEEL_PAGE_286_CASHFLOW = (
+    'Net cash from/(used in) operating activities\n23,879.91\n27,324.93\n(B)\n'
+    'Cash flows from investing activities:\n\t\nPurchase of capital assets\n'
+    '(11,105.71)\n(10,876.23)\nSale of capital assets\n25.28\n221.14\n'
+    'Advance received against sale of property, plant and equipment\n750.00\n-\n'
+    'Purchase of investments in subsidiaries*\n(24,575.72)\n(176.41)\n'
+    'Purchase of other non-current investments\n(327.73)\n(0.01)\nSale of inve'
+)
+
+LICHSGFIN_PAGE_339_CASHFLOW = (
+    'Net Cash used in Operations\n5,569.74\n7,212.64\n'
+    'Loans Disbursed (Net of repayments)\n(22,178.91)\n(14,621.14)\n'
+    'Asset held for sale\n-\n257.09\n\t\n'
+    'Net Cash (Used in) Operating Activities (A)\n(16,609.17)\n(7,151.41)\n'
+    'B. Cash Flow from Investing Activities\n'
+    'Payments for Property, Plant and Equipment\n(73.35)\n(37.45)\n'
+    'Proceeds from Sale of Property, Plant and Equipment\n0.10\n0.80\n'
+    'Payments for Purchase of Investments\n(981.97)\n(88.43)\n'
+    'Proceeds from Sale of Investments\n115.92\n711.59\n'
+    'Dividends Received\n0.52\n0.43\nIncrease in Minority\n0.24\n0.35\n\t\n'
+    'Net Cash Inflow/ (used in) Investing Activities (B)\n(938.54)\n587.29\n'
+    'C. Cash Flow from Financing Activities\nProceeds from B'
+)
+
+LICHSGFIN_PAGE_340_CASHFLOW = (
+    'Net Cash generated from Financing Activities (C)\n17,413.47\n7,345.57\n'
+    '\t\x07Effect of exchange differences on translation of foreign currency cash and cash \n'
+    'equivalents\n-\n(0.01)\n\t\n'
+)
+
+
+class TestNormalizeEvidenceLayout(unittest.TestCase):
+    """
+    Pure transformation tests for _normalize_evidence_layout(), using the
+    real rejected-candidate evidence strings pulled from the last
+    benchmark's validator_rejections.csv files, plus the two adversarial
+    constructions probed during the design review (fiscal-year range,
+    glued reference code).
+    """
+
+    def test_tatasteel_operating_cash_flow_colon_fused(self):
+        evidence = 'Net cash from/(used in) operating activities: 23,879.91'
+        self.assertEqual(
+            _normalize_evidence_layout(evidence),
+            'Net cash from/(used in) operating activities\n23,879.91',
+        )
+
+    def test_tatasteel_operating_cash_flow_second_year(self):
+        evidence = 'Net cash from/(used in) operating activities: (2,314.03), 27,324.93'
+        self.assertEqual(
+            _normalize_evidence_layout(evidence),
+            'Net cash from/(used in) operating activities\n(2,314.03), 27,324.93',
+        )
+
+    def test_lichsgfin_investing_space_fused(self):
+        evidence = 'Net Cash Inflow/ (used in) Investing Activities (B) (73.35) (37.45)'
+        self.assertEqual(
+            _normalize_evidence_layout(evidence),
+            'Net Cash Inflow/ (used in) Investing Activities (B)\n(73.35) (37.45)',
+        )
+
+    def test_lichsgfin_operating_fused_with_fabricated_note_ref(self):
+        # The "(A)" here is fabricated by the model -- real LICHSGFIN p.339
+        # text never follows "Net Cash used in Operations" with "(A)" (that
+        # suffix belongs to a different, later line). Normalization still
+        # splits the layout correctly; whether the resulting label is
+        # actually grounded is L4's job -- see the integration test below,
+        # which confirms this candidate still correctly fails.
+        evidence = 'Net Cash used in Operations (A) 5,569.74 7,212.64'
+        self.assertEqual(
+            _normalize_evidence_layout(evidence),
+            'Net Cash used in Operations (A)\n5,569.74 7,212.64',
+        )
+
+    def test_lichsgfin_financing_regression_split_point(self):
+        # Already passes L4 today as one glued fragment (Benchmark V2
+        # rejection reason for this candidate was only "raw_label_mismatch",
+        # no L4 failure). Confirms normalization finds the correct boundary
+        # rather than corrupting an already-working case.
+        evidence = 'Net Cash generated from Financing Activities (C) 17,413.47 7,345.57'
+        self.assertEqual(
+            _normalize_evidence_layout(evidence),
+            'Net Cash generated from Financing Activities (C)\n17,413.47 7,345.57',
+        )
+
+    def test_reliance_empty_evidence_is_untouched(self):
+        self.assertEqual(_normalize_evidence_layout(""), "")
+
+    def test_fiscal_year_range_not_misread_as_negative_number(self):
+        # Adversarial case from the design review: "2023-24" must not be
+        # split at the hyphen (misreading "-24" as a negative number) or
+        # have "24" absorbed into the trailing numeric run.
+        evidence = "Net cash from operating activities 2023-24 23,879.91"
+        self.assertEqual(
+            _normalize_evidence_layout(evidence),
+            "Net cash from operating activities 2023-24\n23,879.91",
+        )
+
+    def test_f95_reference_code_not_absorbed_into_trailing_run(self):
+        # Adversarial case from the design review: a short reference code
+        # glued to a letter ("F95") must never be treated as a trailing
+        # value, nor pull the run leftward and break "F95" apart.
+        evidence = "Revenue from operations 24 F95 1,32,516.66"
+        self.assertEqual(
+            _normalize_evidence_layout(evidence),
+            "Revenue from operations 24 F95\n1,32,516.66",
+        )
+
+    def test_already_newline_separated_is_untouched(self):
+        evidence = "Total Assets\n25,095.53 \n24,473.83"
+        self.assertEqual(_normalize_evidence_layout(evidence), evidence)
+
+    def test_bare_reference_number_without_decimal_or_comma_does_not_trigger(self):
+        # "24" alone has no '.'/',' -- excluded by the financial-figure
+        # safeguard rather than treated as a fused value.
+        evidence = "Depreciation and amortisation expense note 24"
+        self.assertEqual(_normalize_evidence_layout(evidence), evidence)
+
+    def test_run_spanning_entire_string_does_not_trigger(self):
+        evidence = "23,879.91"
+        self.assertEqual(_normalize_evidence_layout(evidence), evidence)
+
+    def test_numeric_only_prefix_with_no_alpha_does_not_trigger(self):
+        evidence = "*** 1,234.56"
+        self.assertEqual(_normalize_evidence_layout(evidence), evidence)
+
+    def test_idempotent_on_already_normalized_output(self):
+        cases = (
+            'Net cash from/(used in) operating activities: 23,879.91',
+            'Net cash from/(used in) operating activities: (2,314.03), 27,324.93',
+            'Net Cash Inflow/ (used in) Investing Activities (B) (73.35) (37.45)',
+            'Net Cash used in Operations (A) 5,569.74 7,212.64',
+            'Net Cash generated from Financing Activities (C) 17,413.47 7,345.57',
+            "Net cash from operating activities 2023-24 23,879.91",
+            "Revenue from operations 24 F95 1,32,516.66",
+        )
+        for evidence in cases:
+            once = _normalize_evidence_layout(evidence)
+            twice = _normalize_evidence_layout(once)
+            self.assertEqual(once, twice, msg=f"not idempotent for: {evidence!r}")
+
+
+class TestCashFlowEvidenceFixIntegration(unittest.TestCase):
+    """
+    End-to-end checks against real page text (via check_evidence_grounding /
+    check_value_grounding, and validate_candidates for one full-pipeline
+    case) confirming what the normalization fix actually changes for the
+    exact candidates rejected in the last Benchmark V2 run -- and, just as
+    importantly, what it correctly leaves rejected.
+    """
+
+    def test_tatasteel_operating_cash_flow_now_grounds(self):
+        evidence = 'Net cash from/(used in) operating activities: 23,879.91'
+        l4 = check_evidence_grounding(evidence, TATASTEEL_PAGE_286_CASHFLOW)
+        self.assertTrue(l4.passed, msg=l4.reason)
+        l5 = check_value_grounding(23879.91, l4.grounded_region, TATASTEEL_PAGE_286_CASHFLOW)
+        self.assertTrue(l5.passed)
+        self.assertFalse(l5.degraded)
+
+    def test_tatasteel_operating_cash_flow_second_year_now_grounds(self):
+        # The evidence's own embedded number, (2,314.03), is not the
+        # declared value and doesn't appear near this label in the real
+        # source -- L5 must find 27,324.93 from the real text_block, not
+        # trust the evidence string's own numbers.
+        evidence = 'Net cash from/(used in) operating activities: (2,314.03), 27,324.93'
+        l4 = check_evidence_grounding(evidence, TATASTEEL_PAGE_286_CASHFLOW)
+        self.assertTrue(l4.passed, msg=l4.reason)
+        l5 = check_value_grounding(27324.93, l4.grounded_region, TATASTEEL_PAGE_286_CASHFLOW)
+        self.assertTrue(l5.passed)
+        self.assertFalse(l5.degraded)
+
+    def test_lichsgfin_investing_now_grounds_despite_wrong_evidence_numbers(self):
+        # Evidence's own numbers (73.35 / 37.45) are wrong relative to the
+        # real source (938.54 / 587.29) -- the clearest demonstration of
+        # the fix: L4 only needs the label; L5 re-derives the value from
+        # the real text_block independently of what the evidence claimed.
+        evidence = 'Net Cash Inflow/ (used in) Investing Activities (B) (73.35) (37.45)'
+        l4 = check_evidence_grounding(evidence, LICHSGFIN_PAGE_339_CASHFLOW)
+        self.assertTrue(l4.passed, msg=l4.reason)
+        l5 = check_value_grounding(-938.54, l4.grounded_region, LICHSGFIN_PAGE_339_CASHFLOW)
+        self.assertTrue(l5.passed)
+        self.assertFalse(l5.degraded)
+        self.assertEqual(l5.matched_number, -938.54)
+
+    def test_lichsgfin_operating_still_fails_fabricated_note_ref(self):
+        # "(A)" is fabricated by the model -- the real source line is
+        # "Net Cash used in Operations" with no note reference (that suffix
+        # belongs to a different, later line: "Net Cash (Used in) Operating
+        # Activities (A)"). Normalization must not manufacture a false
+        # accept: L4 should still correctly fail.
+        evidence = 'Net Cash used in Operations (A) 5,569.74 7,212.64'
+        l4 = check_evidence_grounding(evidence, LICHSGFIN_PAGE_339_CASHFLOW)
+        self.assertFalse(l4.passed)
+        self.assertIn("fragment_not_found_in_order", l4.reason)
+
+    def test_lichsgfin_financing_regression_still_grounds(self):
+        evidence = 'Net Cash generated from Financing Activities (C) 17,413.47 7,345.57'
+        l4 = check_evidence_grounding(evidence, LICHSGFIN_PAGE_340_CASHFLOW)
+        self.assertTrue(l4.passed, msg=l4.reason)
+        l5 = check_value_grounding(17413.47, l4.grounded_region, LICHSGFIN_PAGE_340_CASHFLOW)
+        self.assertTrue(l5.passed)
+        self.assertFalse(l5.degraded)
+
+    def test_reliance_empty_evidence_still_fails_no_text_anchor(self):
+        l4 = check_evidence_grounding("", TATASTEEL_PAGE_286_CASHFLOW)
+        self.assertFalse(l4.passed)
+        self.assertEqual(l4.reason, "no_text_anchor_in_evidence")
+
+    def test_full_pipeline_accepts_rescued_lichsgfin_investing_candidate(self):
+        candidate = _make_candidate(
+            "investing_cash_flow",
+            "Net Cash Inflow/ (used in) Investing Activities (B)",
+            -938.54,
+            'Net Cash Inflow/ (used in) Investing Activities (B) (73.35) (37.45)',
+            statement_type="cash_flow", doc_id="287f1ff9bd7d", year=2025,
+        )
+        _, diagnostics = validate_candidates([candidate], LICHSGFIN_PAGE_339_CASHFLOW)
+        self.assertEqual(len(diagnostics), 1)
+        # Only assert on what this fix changed (L4/L5) -- L2 depends on
+        # canonical_metrics.match_metric()'s own patterns for
+        # investing_cash_flow, which are unrelated to and unmodified by
+        # this fix (a separate, already-documented Benchmark V2 issue).
+        self.assertTrue(diagnostics[0].l4_passed)
+        self.assertTrue(diagnostics[0].l5_passed)
 
 
 if __name__ == "__main__":
