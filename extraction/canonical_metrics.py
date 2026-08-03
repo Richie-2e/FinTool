@@ -210,6 +210,7 @@ CANONICAL_METRICS: dict[str, dict] = {
             r"^net cash from/\(used in\) operating activities$",
             r"^net cash generated from(?: /\(used in\))? operating activities$",
             r"^net cash provided by operating activities$",
+            r"^cash from operating activities$",
         ],
         "xbrl_tags": ["NetCashProvidedByUsedInOperatingActivities"],
         "exclude": [],
