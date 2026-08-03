@@ -285,6 +285,20 @@ class _OrderedSearchResult:
     failed_fragment: Optional[str] = None
 
 
+def _is_word_boundary_char(ch: Optional[str]) -> bool:
+    """
+    True if `ch` is a valid word-boundary character: absent (string start/
+    end) or neither alphanumeric nor a hyphen. Hyphen is deliberately
+    excluded from "boundary-safe" (unlike a standard regex \\b, which would
+    treat it as one) because the real collision this guards against is a
+    hyphenated compound like "non-current assets" containing "current
+    assets" as a substring -- the character before that inner match is '-',
+    which a plain alnum/non-alnum check alone would wrongly accept as a
+    boundary.
+    """
+    return ch is None or not (ch.isalnum() or ch == "-")
+
+
 def _ordered_fragment_search(
     text_fragments: list[str],
     normalized_text_block: str,
@@ -293,7 +307,14 @@ def _ordered_fragment_search(
     Search for `text_fragments` (raw, unnormalized "text"-classified
     fragments, in their original evidence order) within an already-normalized
     `normalized_text_block`, requiring each fragment to be found at or after
-    the position the previous one ended at.
+    the position the previous one ended at, AND to occur at a genuine word
+    boundary (see _is_word_boundary_char) -- not merely as a substring
+    inside a larger word or hyphenated compound (RC-1: "current assets"
+    matching inside "non-current assets" would otherwise anchor evidence at
+    the wrong location; confirmed on real OFSS and Reliance balance sheets).
+    A candidate match that fails the boundary check is not treated as a
+    failure of the whole search -- the search resumes one character later,
+    looking for a later, valid occurrence of the same fragment.
 
     This is deliberately NOT a contiguous/windowed match: gaps between
     fragments are unbounded (the frozen L4 design explicitly drops a hard
@@ -322,8 +343,21 @@ def _ordered_fragment_search(
             # that normalize to empty; skip rather than fail on one.
             continue
 
-        idx = normalized_text_block.find(norm_fragment, cursor)
-        if idx == -1:
+        search_from = cursor
+        idx = None
+        while True:
+            candidate_idx = normalized_text_block.find(norm_fragment, search_from)
+            if candidate_idx == -1:
+                break
+            end = candidate_idx + len(norm_fragment)
+            before = normalized_text_block[candidate_idx - 1] if candidate_idx > 0 else None
+            after = normalized_text_block[end] if end < len(normalized_text_block) else None
+            if _is_word_boundary_char(before) and _is_word_boundary_char(after):
+                idx = candidate_idx
+                break
+            search_from = candidate_idx + 1
+
+        if idx is None:
             return _OrderedSearchResult(
                 succeeded=False,
                 matches=matches,
@@ -496,21 +530,62 @@ def _numbers_in(text: str) -> list[float]:
     return numbers
 
 
+def _evidence_self_confirms_value(evidence: str, value: float) -> bool:
+    """
+    FV2-2: True if `evidence` (the candidate's full raw evidence string, not
+    just its "text"-classified fragments) itself contains a number matching
+    `value` (exact or within _VALUE_RELATIVE_TOLERANCE).
+
+    This is deliberately checked against the model's OWN reported evidence,
+    not the source text_block -- it answers "did the model's own quote
+    already agree with what it declared?", which is a different and
+    narrower question than "does this value appear anywhere on the page?".
+    A "numeric" fragment in evidence is excluded from L4's ordered
+    text-fragment search (see _classify_fragment) but is not discarded here;
+    reusing it is what lets FV2-2 avoid guessing a wider fixed window.
+
+    Measured live against real benchmark data (see FRAMEWORK_V2_IMPLEMENTATION_PLAN.md's
+    FV2-2 entry): every genuine window-blocked OFSS candidate
+    (current_assets, current_liabilities, long_term_debt) has its declared
+    value quoted verbatim in its own evidence; every known fabrication
+    (LICHSGFIN's cross-row total_liabilities, OFSS's hallucinated
+    gross_profit) does not. This is the gate that lets check_value_grounding
+    search further without needing an arbitrarily larger fixed constant.
+    """
+    for n in _numbers_in(_normalize_for_grounding(evidence)):
+        if n == value or (n != 0 and abs(n - value) / abs(n) < _VALUE_RELATIVE_TOLERANCE):
+            return True
+    return False
+
+
 def check_value_grounding(
     value: float,
     grounded_region: Optional[str],
     text_block: str,
+    evidence: Optional[str] = None,
 ) -> ValueGroundingResult:
     """
     Public L5 entry point: is `value` grounded near the L4-verified region?
 
     If `grounded_region` is provided (L4 passed), the search space is the
-    region itself plus a small, fixed trailing extension into the
-    surrounding normalized text_block (_VALUE_SEARCH_TRAILING_EXTENSION),
-    calibrated against real benchmark data to cover "the next number after
-    the last grounded label" without reaching into an unrelated row. L4's
-    own grounded_region definition is not changed by this -- the extension
-    is local to this function's own search window only.
+    region itself plus a trailing extension into the surrounding normalized
+    text_block. That extension is _VALUE_SEARCH_TRAILING_EXTENSION by
+    default -- calibrated against real benchmark data to cover "the next
+    number after the last grounded label" without reaching into an
+    unrelated row -- UNLESS `evidence` is supplied and
+    _evidence_self_confirms_value(evidence, value) is True, in which case
+    the search space extends all the way to the end of the (already
+    length-capped, per-call) normalized text_block instead (FV2-2). A flat
+    wider constant was measured to be unsafe: OFSS's current_liabilities
+    needs a 339-character window, but LICHSGFIN's frozen cross-row
+    total_liabilities fabrication starts incorrectly passing at 349 --
+    a 10-character margin, too fragile to be a real fix. Gating the wider
+    search on the model's own evidence already agreeing with its declared
+    value avoids picking any such constant at all: fabricated candidates
+    generally don't self-confirm (their own quoted number doesn't match
+    what they declared either), so they never reach the wider search.
+    L4's own grounded_region definition is not changed by any of this --
+    the extension is local to this function's own search window only.
 
     If `grounded_region` is None (L4 failed), falls back to searching the
     full normalized text_block, for diagnostic purposes only
@@ -527,6 +602,11 @@ def check_value_grounding(
         or None if L4 failed.
     text_block : str
         The same page text passed to the LLM for this call, unnormalized.
+    evidence : str or None
+        The candidate's full raw evidence string (CandidateMetric.evidence).
+        Optional and defaults to None for backward compatibility with
+        existing callers/tests; when omitted, behavior is identical to
+        before FV2-2 (fixed _VALUE_SEARCH_TRAILING_EXTENSION window only).
 
     Returns
     -------
@@ -545,9 +625,11 @@ def check_value_grounding(
             # extension possible without knowing where it sits).
             search_space = grounded_region
         else:
-            extension_end = (
-                region_pos + len(grounded_region) + _VALUE_SEARCH_TRAILING_EXTENSION
-            )
+            region_end = region_pos + len(grounded_region)
+            if evidence and _evidence_self_confirms_value(evidence, value):
+                extension_end = len(normalized_text_block)
+            else:
+                extension_end = region_end + _VALUE_SEARCH_TRAILING_EXTENSION
             search_space = normalized_text_block[region_pos:extension_end]
         degraded = False
 
@@ -656,7 +738,7 @@ def validate_candidates(
         l2_passed = match_metric(candidate.raw_label, candidate.statement_type) == candidate.metric_name
 
         l4_result = check_evidence_grounding(candidate.evidence, text_block)
-        l5_result = check_value_grounding(candidate.value, l4_result.grounded_region, text_block)
+        l5_result = check_value_grounding(candidate.value, l4_result.grounded_region, text_block, candidate.evidence)
 
         l5_effective_passed = l5_result.passed and not l5_result.degraded
 
