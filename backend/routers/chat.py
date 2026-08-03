@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from backend.exceptions import APIError
-from backend.models.db import ComputedMetric, get_db
+from backend.models.db import ComputedMetric, ResolvedMetric, get_db
 from backend.models.schemas import ChatRequest, ChatResponse, MetricUsed, SourceItem
 from backend.routers.metrics import _get_ready_doc
 from backend.services.rag_service import build_grounded_prompt, build_rag_context, call_llm
@@ -65,6 +65,33 @@ _KEY_METRICS: list[str] = [
     "operating_margin",
 ]
 
+# FV2-7: maps lowercase phrases to raw ResolvedMetric.metric_name values --
+# separate from _MENTION_MAP above because ResolvedMetric rows are one row
+# per (metric_name, year), not one wide row per year with a column per
+# metric, so they're matched against differently in _extract_metrics_used.
+_RAW_METRIC_MENTION_MAP: dict[str, str] = {
+    "revenue":                  "revenue",
+    "gross profit":             "gross_profit",
+    "operating profit":         "operating_profit",
+    "net profit":                "net_profit",
+    "interest expense":         "interest_expense",
+    "total assets":             "total_assets",
+    "current assets":           "current_assets",
+    "cash and cash equivalents": "cash_and_equivalents",
+    "total liabilities":        "total_liabilities",
+    "current liabilities":      "current_liabilities",
+    "long-term debt":           "long_term_debt",
+    "long term debt":           "long_term_debt",
+    "short-term debt":          "short_term_debt",
+    "short term debt":          "short_term_debt",
+    "total equity":             "total_equity",
+    "operating cash flow":      "operating_cash_flow",
+    "investing cash flow":      "investing_cash_flow",
+    "financing cash flow":      "financing_cash_flow",
+    "capital expenditure":      "capex",
+    "capex":                    "capex",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,27 +101,35 @@ def _extract_metrics_used(
     answer: str,
     question: str,
     computed_rows: list,
+    resolved_rows: list,
 ) -> list[MetricUsed]:
     """
-    Scan answer + question for ratio name mentions; emit MetricUsed entries
-    for every (metric, year) pair found in computed_rows.
+    Scan answer + question for ratio and raw-metric name mentions; emit
+    MetricUsed entries for every (metric, year) pair found in computed_rows
+    or resolved_rows (FV2-7), so metrics_used stays consistent with what the
+    RESOLVED METRICS prompt section made available to the answer.
     """
     combined = (answer + " " + question).lower()
 
-    # Collect canonical attr names that are mentioned
-    mentioned: set[str] = set()
-    for phrase, attr in _MENTION_MAP.items():
-        if phrase in combined:
-            mentioned.add(attr)
+    # Collect canonical attr names that are mentioned, per row shape --
+    # ComputedMetric is wide (one row per year, a column per ratio);
+    # ResolvedMetric is long (one row per metric_name/year pair), so each
+    # needs its own mention set and its own matching loop below.
+    mentioned_ratios: set[str] = {attr for phrase, attr in _MENTION_MAP.items() if phrase in combined}
+    mentioned_raw: set[str] = {attr for phrase, attr in _RAW_METRIC_MENTION_MAP.items() if phrase in combined}
 
-    if not mentioned:
+    if not mentioned_ratios and not mentioned_raw:
         return []
 
     used: list[MetricUsed] = []
     for row in computed_rows:
-        for attr in mentioned:
+        for attr in mentioned_ratios:
             val = getattr(row, attr, None)
             used.append(MetricUsed(metric=attr, year=row.year, value=val))
+
+    for row in resolved_rows:
+        if row.metric_name in mentioned_raw and row.year is not None:
+            used.append(MetricUsed(metric=row.metric_name, year=row.year, value=row.value))
 
     return used
 
@@ -137,11 +172,20 @@ def post_chat(req: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
         .all()
     )
 
+    # Fetch all resolved (raw) metric rows for this document (all years) -- FV2-7
+    resolved_rows = (
+        db.query(ResolvedMetric)
+        .filter(ResolvedMetric.doc_id == doc_id)
+        .order_by(ResolvedMetric.year)
+        .all()
+    )
+
     # Build grounded prompt and call Claude
     prompt = build_grounded_prompt(
         req.question,
         rag_context["chunks"],
         computed_rows,
+        resolved_rows,
         doc,
     )
 
@@ -150,7 +194,7 @@ def post_chat(req: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
 
     # Post-process
     sources      = [SourceItem(**s) for s in rag_context["sources"]]
-    metrics_used = _extract_metrics_used(answer, req.question, computed_rows)
+    metrics_used = _extract_metrics_used(answer, req.question, computed_rows, resolved_rows)
     warning      = _build_warning(computed_rows)
 
     return ChatResponse(

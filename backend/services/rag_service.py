@@ -77,17 +77,84 @@ _RISK_LABELS: list[tuple[str, str]] = [
     ("overall_risk",       "Overall Risk"),
 ]
 
+# FV2-7: raw resolved-metric labels, grouped by statement (Income Statement ->
+# Balance Sheet -> Cash Flow) rather than database/insertion order. Within
+# each group, metrics are listed in standard statement presentation order
+# (e.g. Assets before Liabilities before Equity). This groups each metric's
+# own years on adjacent lines, which matters for the dominant real question
+# pattern observed in this project's chat evaluation (same-metric,
+# cross-year comparisons -- e.g. "revenue 2025 vs 2024") -- unlike
+# COMPUTED_METRICS below, which is deliberately left at its existing
+# year-outer nesting: ratios have no natural "statement" to group by, and
+# that section's format is unchanged, working, and out of scope here.
+_RAW_METRIC_LABELS: dict[str, list[tuple[str, str]]] = {
+    "Income Statement": [
+        ("revenue",           "Revenue"),
+        ("gross_profit",      "Gross Profit"),
+        ("operating_profit",  "Operating Profit"),
+        ("net_profit",        "Net Profit"),
+        ("interest_expense",  "Interest Expense"),
+    ],
+    "Balance Sheet": [
+        ("total_assets",          "Total Assets"),
+        ("current_assets",        "Current Assets"),
+        ("cash_and_equivalents",  "Cash and Cash Equivalents"),
+        ("total_liabilities",     "Total Liabilities"),
+        ("current_liabilities",   "Current Liabilities"),
+        ("long_term_debt",        "Long-Term Debt"),
+        ("short_term_debt",       "Short-Term Debt"),
+        ("total_equity",          "Total Equity"),
+    ],
+    "Cash Flow": [
+        ("operating_cash_flow",  "Operating Cash Flow"),
+        ("investing_cash_flow",  "Investing Cash Flow"),
+        ("financing_cash_flow",  "Financing Cash Flow"),
+        ("capex",                "Capital Expenditure"),
+    ],
+}
+
 
 def build_grounded_prompt(
     question: str,
     chunks: list[TextChunk],
     computed_metrics_rows: list,   # list of ComputedMetric ORM objects (all years)
+    resolved_metrics_rows: list,   # list of ResolvedMetric ORM objects (all years) -- FV2-7
     doc_meta,                      # Document ORM object
 ) -> str:
     """
     Assemble the grounded prompt per SPEC_api.md §3.6.
-    computed_metrics_rows should be all years, ordered ascending.
+    computed_metrics_rows and resolved_metrics_rows should be all years.
     """
+    # ── RESOLVED METRICS section (FV2-7) ─────────────────────────────────────
+    # ResolvedMetric is one row per (metric_name, year) -- unlike ComputedMetric,
+    # which is one row per year with a column per ratio. Index by metric name
+    # first so each metric's years can be grouped and sorted together.
+    by_metric_year: dict[str, dict[int, tuple[float, Optional[str], Optional[int]]]] = {}
+    for row in resolved_metrics_rows:
+        if row.year is None or row.value is None:
+            continue
+        by_metric_year.setdefault(row.metric_name, {})[row.year] = (row.value, row.unit, row.page_no)
+
+    raw_lines: list[str] = []
+    for group_label, group_metrics in _RAW_METRIC_LABELS.items():
+        group_lines: list[str] = []
+        for attr, label in group_metrics:
+            years = by_metric_year.get(attr, {})
+            for yr in sorted(years):
+                value, unit, page_no = years[yr]
+                unit_suffix = f" {unit}" if unit else ""
+                page_suffix = f" (page {page_no})" if page_no is not None else ""
+                group_lines.append(f"  {label} ({yr}): {value:,.2f}{unit_suffix}{page_suffix}")
+        if group_lines:
+            raw_lines.append(f"{group_label}:")
+            raw_lines.extend(group_lines)
+
+    resolved_section = (
+        "\n".join(raw_lines)
+        if raw_lines
+        else "  No resolved metrics available."
+    )
+
     # ── COMPUTED METRICS section ─────────────────────────────────────────────
     metric_lines: list[str] = []
     for row in computed_metrics_rows:
@@ -124,6 +191,9 @@ def build_grounded_prompt(
     return (
         "You are a financial analyst assistant. You must only use the information provided below.\n"
         "Do not use any outside knowledge. Do not invent numbers.\n"
+        "\n"
+        "RESOLVED METRICS (extracted directly from the financial statements — authoritative):\n"
+        f"{resolved_section}\n"
         "\n"
         "COMPUTED METRICS (authoritative — do not contradict these):\n"
         f"{metrics_section}\n"
