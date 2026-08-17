@@ -94,6 +94,110 @@ class TestOperatingCashFlowExistingLabelsStillMatch(unittest.TestCase):
         )
 
 
+class TestLeadingNumberedPrefixLICHSGFINCase(unittest.TestCase):
+    """
+    The real raw_label observed for LICHSGFIN's revenue line, which was
+    previously rejected at L2 with raw_label_mismatch because the leading
+    "(1) " line-item prefix Indian income statements use was not stripped
+    before matching (see the C1 offline replay experiment).
+    """
+
+    def test_lichsgfin_real_raw_label_now_matches(self):
+        self.assertEqual(
+            match_metric("(1) REVENUE FROM OPERATIONS", "income_statement"),
+            "revenue",
+        )
+
+    def test_lichsgfin_raw_label_matches_without_statement_type_filter(self):
+        self.assertEqual(
+            match_metric("(1) REVENUE FROM OPERATIONS"),
+            "revenue",
+        )
+
+    def test_multi_digit_leading_prefix_still_matches(self):
+        # The prefix regex must not be limited to single-digit line numbers.
+        self.assertEqual(
+            match_metric("(10) Net profit", "income_statement"),
+            "net_profit",
+        )
+
+    def test_leading_prefix_and_trailing_note_ref_both_strip(self):
+        # Leading numbered prefix and trailing single-letter note reference
+        # are independent normalisations; both must apply in combination.
+        self.assertEqual(
+            match_metric("(1) Total equity (a)", "balance_sheet"),
+            "total_equity",
+        )
+
+
+class TestLeadingNumberedPrefixExistingLabelsStillMatch(unittest.TestCase):
+    """
+    Non-regression: pre-existing labels with no leading numbered prefix must
+    still resolve exactly as before.
+    """
+
+    def test_plain_revenue_from_operations_still_matches(self):
+        self.assertEqual(
+            match_metric("Revenue from operations", "income_statement"),
+            "revenue",
+        )
+
+    def test_plain_total_assets_still_matches(self):
+        self.assertEqual(
+            match_metric("Total assets", "balance_sheet"),
+            "total_assets",
+        )
+
+    def test_plain_net_profit_still_matches(self):
+        self.assertEqual(
+            match_metric("Net profit", "income_statement"),
+            "net_profit",
+        )
+
+    def test_ofss_operating_cash_flow_label_still_matches(self):
+        # Guards against interaction with the operating_cash_flow pattern
+        # added in the previous canonical_metrics.py change.
+        self.assertEqual(
+            match_metric("Cash from operating activities", "cash_flow"),
+            "operating_cash_flow",
+        )
+
+
+class TestLeadingNumberedPrefixNegativeCases(unittest.TestCase):
+    """
+    The new prefix-stripping must not widen matching: an unrelated numbered
+    label must still return no match (or its own genuinely-excluded result),
+    never fall through to an unrelated canonical metric such as revenue.
+    """
+
+    def test_numbered_unrelated_label_still_returns_none(self):
+        self.assertIsNone(
+            match_metric("(2) Depreciation and amortisation", "income_statement")
+        )
+
+    def test_numbered_excluded_metric_margin_still_returns_none(self):
+        # "Net profit margin" is explicitly excluded for net_profit; the
+        # exclude check must still fire after the new prefix is stripped,
+        # and the label must not incorrectly fall through to revenue or any
+        # other canonical metric.
+        self.assertIsNone(
+            match_metric("(1) Net profit margin", "income_statement")
+        )
+
+    def test_numbered_total_liabilities_and_equity_still_returns_none(self):
+        self.assertIsNone(
+            match_metric("(1) Total liabilities and equity", "balance_sheet")
+        )
+
+    def test_bare_number_in_middle_of_label_not_stripped(self):
+        # The prefix regex is anchored at the start of the string -- a
+        # number appearing elsewhere in the label (not a leading prefix)
+        # must not be treated as a line-item number.
+        self.assertIsNone(
+            match_metric("Total Income (1+2)", "income_statement")
+        )
+
+
 class TestOperatingCashFlowNegativeCases(unittest.TestCase):
     """
     The new pattern must not widen matching to sibling cash-flow metrics or

@@ -308,6 +308,12 @@ YEAR_RE = re.compile(r"\b(20\d{2})\b")
 # "(used in)" are never touched.
 _TRAILING_NOTE_REF_RE = re.compile(r"\s*\([a-z]\)$")
 
+# A leading numbered line-item prefix, e.g. the "(1)" / "(3)" / "(10)" line
+# numbers Indian income statements prefix each row with ("(1) Revenue from
+# operations"). Anchored at the start of the string so it only strips a
+# genuine leading prefix, never a number appearing elsewhere in the label.
+_LEADING_NUMBERED_PREFIX_RE = re.compile(r"^\(\d+\)\s*")
+
 
 def match_metric(label: str, statement_type: str | None = None) -> str | None:
     """
@@ -315,8 +321,9 @@ def match_metric(label: str, statement_type: str | None = None) -> str | None:
 
     Steps:
       1. Normalise label (strip, collapse whitespace, lowercase).
-      2. Strip a trailing single-letter note reference, if present.
-      3. For each candidate metric (filtered by statement_type when given):
+      2. Strip a leading numbered line-item prefix, if present.
+      3. Strip a trailing single-letter note reference, if present.
+      4. For each candidate metric (filtered by statement_type when given):
          a. If any exclude pattern matches → skip this metric.
          b. If any pattern matches → return the metric name.
     """
@@ -324,6 +331,7 @@ def match_metric(label: str, statement_type: str | None = None) -> str | None:
         return None
 
     normalised = re.sub(r"\s+", " ", label.strip().lower())
+    normalised = _LEADING_NUMBERED_PREFIX_RE.sub("", normalised)
     normalised = _TRAILING_NOTE_REF_RE.sub("", normalised)
 
     for metric_name, spec in CANONICAL_METRICS.items():
