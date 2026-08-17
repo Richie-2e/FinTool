@@ -12,11 +12,21 @@ metric_extractor's _NUMBER_RE / parse_value() rather than duplicating number
 parsing. Does not modify L4; searches a minimal, explicitly-bounded
 extension past the L4-defined grounded_region rather than changing L4's own
 boundary definition.
+Stage 4.5: label verbatim-fidelity grounding (L3) -- check_label_grounding().
+Reuses L4's own fragment-split/classify/ordered-search machinery to verify
+that raw_label itself (not just evidence) is genuine source text. Closes a
+confirmed gap: L2 only checks raw_label MAPS to the claimed metric_name, and
+L4 grounds evidence, a separate field -- neither verifies raw_label is
+verbatim-present in the source, which let a fabricated-but-internally-
+consistent raw_label (Jio Financial Services' "Current assets", which never
+appears on the source page; the real line is "Total Non-financial assets")
+pass every existing check.
 Stage 5: orchestration -- validate_candidates(), the single entry point
-llm_extractor.py calls. Evaluates L2 (raw-label, via
-canonical_metrics.match_metric()), L4, and L5 for every candidate,
-unconditionally (no short-circuit), so rejected candidates always carry
-complete per-check diagnostics.
+llm_extractor.py calls. Evaluates L2 (raw-label mapping, via
+canonical_metrics.match_metric()), L3 (raw-label grounding), L4 (evidence
+grounding), and L5 (value grounding) for every candidate, unconditionally
+(no short-circuit), so rejected candidates always carry complete per-check
+diagnostics.
 
 No Ollama or network dependency; deterministic; stdlib-only.
 """
@@ -480,6 +490,67 @@ def check_evidence_grounding(evidence: str, text_block: str) -> EvidenceGroundin
 
 
 # ---------------------------------------------------------------------------
+# Label verbatim-fidelity grounding (L3)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class LabelGroundingResult:
+    """Result of the public L3 check, check_label_grounding()."""
+    passed: bool
+    reason: str = ""
+
+
+def check_label_grounding(raw_label: str, text_block: str) -> LabelGroundingResult:
+    """
+    Public L3 entry point: does `raw_label` itself appear verbatim in
+    `text_block`?
+
+    Reuses the exact L4 pipeline stages (fragment split -> text-fragment
+    classification -> ordered-subsequence search over the normalized
+    text_block) rather than a separate matching strategy, so it inherits
+    L4's word-boundary guarantee for free -- "current assets" cannot
+    falsely anchor inside "non-current assets" here either (see RC-1 in
+    _ordered_fragment_search's docstring). `_normalize_evidence_layout` is
+    NOT applied: that step exists solely to un-fuse a label glued to its
+    own trailing value in an `evidence` string (a cash_flow-specific
+    pattern); raw_label is a label-only field with no such pattern to
+    undo.
+
+    A raw_label that yields no "text"-classified fragment at all (empty,
+    or purely numeric) cannot establish any anchor and is rejected --
+    consistent with L4's own no_text_anchor_in_evidence case for an
+    equivalent input.
+
+    Parameters
+    ----------
+    raw_label : str
+        The candidate's declared label (CandidateMetric.raw_label).
+    text_block : str
+        The same page text passed to the LLM for this call (identical
+        input check_evidence_grounding searches), unnormalized.
+
+    Returns
+    -------
+    LabelGroundingResult
+    """
+    fragments = _split_evidence_fragments(raw_label)
+    text_fragments = [f for f in fragments if _classify_fragment(f) == "text"]
+
+    normalized_text_block = _normalize_for_grounding(text_block)
+    search_result = _ordered_fragment_search(text_fragments, normalized_text_block)
+
+    if not search_result.succeeded:
+        reason = (
+            f"fragment_not_found_in_order: {search_result.failed_fragment!r}"
+            if search_result.failed_fragment is not None
+            else "no_text_anchor_in_raw_label"
+        )
+        return LabelGroundingResult(passed=False, reason=reason)
+
+    return LabelGroundingResult(passed=True, reason="grounded")
+
+
+# ---------------------------------------------------------------------------
 # Value grounding (L5)
 # ---------------------------------------------------------------------------
 
@@ -666,7 +737,9 @@ class RejectionRecord:
     validator_rejections.csv column contract agreed earlier
     (doc_id, statement_type, metric_name, raw_label, value, unit, year,
     evidence, rejection_reason) plus per-check pass/fail booleans for
-    finer-grained debugging.
+    finer-grained debugging. l3_passed was added when L3 (raw-label
+    verbatim-fidelity grounding) was introduced; it is additive to the
+    existing column contract, not a replacement for any existing field.
     """
     doc_id: str
     statement_type: str
@@ -677,6 +750,7 @@ class RejectionRecord:
     year: Optional[int]
     evidence: str
     l2_passed: bool
+    l3_passed: bool          # False if raw_label is not verbatim-findable in text_block
     l4_passed: bool
     l5_passed: bool          # False if L5 failed OR was degraded; a degraded pass never counts
     l5_degraded: bool        # True iff L4 failed and L5 fell back to a full-text_block diagnostic check
@@ -688,13 +762,14 @@ def validate_candidates(
     text_block: str,
 ) -> tuple[list[CandidateMetric], list[RejectionRecord]]:
     """
-    Orchestrate L2 (raw-label), L4 (evidence grounding), and L5 (value
-    grounding) over a batch of candidates that share the same source
-    text_block (i.e. one call per extract_with_llm() statement-type loop
-    iteration, mirroring how call_ollama()/parse_response() are already
-    invoked once per statement type).
+    Orchestrate L2 (raw-label mapping), L3 (raw-label grounding), L4
+    (evidence grounding), and L5 (value grounding) over a batch of
+    candidates that share the same source text_block (i.e. one call per
+    extract_with_llm() statement-type loop iteration, mirroring how
+    call_ollama()/parse_response() are already invoked once per statement
+    type).
 
-    Each candidate is evaluated against all three checks unconditionally --
+    Each candidate is evaluated against all four checks unconditionally --
     no short-circuit on an earlier failure -- so every RejectionRecord
     carries complete diagnostics, not just the first failure reason. This
     was essential during the earlier benchmark investigation (distinguishing
@@ -703,13 +778,14 @@ def validate_candidates(
 
     L2 reuses canonical_metrics.match_metric() directly, per the reuse-first
     decision made when L2 was designed -- no separate raw-label-matching
-    function exists or is duplicated here. L4 and L5 reuse their own public
-    entry points (check_evidence_grounding, check_value_grounding) exactly
-    as implemented in Stages 3 and 4; neither's behavior is touched by this
-    function.
+    function exists or is duplicated here. L3, L4, and L5 reuse their own
+    public entry points (check_label_grounding, check_evidence_grounding,
+    check_value_grounding) exactly as implemented in Stages 4.5, 3, and 4;
+    none of their behavior is touched by this function.
 
     A candidate is accepted only if:
-        l2_passed AND l4_result.passed AND l5_result.passed AND NOT l5_result.degraded
+        l2_passed AND l3_result.passed AND l4_result.passed AND
+        l5_result.passed AND NOT l5_result.degraded
     (a degraded L5 result means L4 failed and L5 fell back to a full-page
     diagnostic-only check -- it never counts toward acceptance, per
     check_value_grounding's own contract from Stage 4).
@@ -737,6 +813,8 @@ def validate_candidates(
     for candidate in candidates:
         l2_passed = match_metric(candidate.raw_label, candidate.statement_type) == candidate.metric_name
 
+        l3_result = check_label_grounding(candidate.raw_label, text_block)
+
         l4_result = check_evidence_grounding(candidate.evidence, text_block)
         l5_result = check_value_grounding(candidate.value, l4_result.grounded_region, text_block, candidate.evidence)
 
@@ -745,6 +823,8 @@ def validate_candidates(
         reasons: list[str] = []
         if not l2_passed:
             reasons.append("raw_label_mismatch")
+        if not l3_result.passed:
+            reasons.append(f"raw_label_not_grounded:{l3_result.reason}")
         if not l4_result.passed:
             reasons.append(f"evidence_not_grounded:{l4_result.reason}")
         elif not l5_effective_passed:
@@ -753,7 +833,7 @@ def validate_candidates(
             # meaningfully evaluate, and the L4 reason above is the real cause.
             reasons.append(f"value_not_grounded:{l5_result.reason}")
 
-        is_accepted = l2_passed and l4_result.passed and l5_effective_passed
+        is_accepted = l2_passed and l3_result.passed and l4_result.passed and l5_effective_passed
 
         diagnostics.append(RejectionRecord(
             doc_id=candidate.doc_id,
@@ -765,6 +845,7 @@ def validate_candidates(
             year=candidate.year,
             evidence=candidate.evidence,
             l2_passed=l2_passed,
+            l3_passed=l3_result.passed,
             l4_passed=l4_result.passed,
             l5_passed=l5_effective_passed,
             l5_degraded=l5_result.degraded,

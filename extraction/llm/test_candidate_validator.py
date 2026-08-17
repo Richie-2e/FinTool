@@ -27,6 +27,7 @@ from extraction.metric_extractor import CandidateMetric
 
 from extraction.llm.candidate_validator import (
     EvidenceGroundingResult,
+    LabelGroundingResult,
     RejectionRecord,
     ValueGroundingResult,
     _FragmentMatch,
@@ -40,6 +41,7 @@ from extraction.llm.candidate_validator import (
     _ordered_fragment_search,
     _split_evidence_fragments,
     check_evidence_grounding,
+    check_label_grounding,
     check_value_grounding,
     validate_candidates,
 )
@@ -683,6 +685,59 @@ class TestCheckEvidenceGrounding(unittest.TestCase):
         self.assertEqual(result.grounded_region, "total assets")
 
 
+class TestCheckLabelGrounding(unittest.TestCase):
+    """
+    L3: does raw_label itself (not evidence) appear verbatim in the page?
+    Added to close the confirmed Jio Financial Services gap -- see
+    check_label_grounding()'s docstring and TestValidateCandidatesL3Regression
+    below for the full reproduction.
+    """
+
+    def test_valid_raw_label_present_in_source_passes(self):
+        # Real JioFin raw_label, genuinely present on the page.
+        result = check_label_grounding("Total Assets", JIOFIN_PAGE_83)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.reason, "grounded")
+
+    def test_raw_label_absent_from_source_fails(self):
+        # "Current assets" never appears on JIOFIN_PAGE_83 at all (the real
+        # line is "Total Non-financial assets") -- this is the exact
+        # fabricated label from the confirmed Jio bug.
+        result = check_label_grounding("Current assets", JIOFIN_PAGE_83)
+        self.assertFalse(result.passed)
+        self.assertIn("Current assets", result.reason)
+
+    def test_raw_label_absent_but_would_be_grounded_as_evidence_elsewhere(self):
+        # "Gross profit/(loss)" does not appear anywhere on TataSteel's
+        # income statement page (confirmed above in
+        # TestCheckEvidenceGrounding.test_fails_when_fragment_does_not_exist_on_page)
+        # -- L3 must independently reject it as a raw_label too, regardless
+        # of what a separate evidence field might ground.
+        result = check_label_grounding("Gross profit/(loss)", TATASTEEL_PAGE_283)
+        self.assertFalse(result.passed)
+
+    def test_boundary_safe_current_assets_not_falsely_grounded_by_non_current(self):
+        # RC-1 guard inherited from L4: "current assets" must not be
+        # considered grounded merely because "non-current assets" appears
+        # on the page (OFSS_PAGE_61 has non-current assets but no bare
+        # "Current assets" heading before the real "Current assets" line
+        # further down -- this specifically checks the hyphen-boundary case).
+        result = check_label_grounding("Current assets", OFSS_PAGE_61)
+        # OFSS_PAGE_61 does contain a genuine, later "Current assets" line
+        # (own heading), so this must pass -- distinct from matching inside
+        # "Non-current assets" above it.
+        self.assertTrue(result.passed)
+
+    def test_empty_raw_label_fails_no_text_anchor(self):
+        result = check_label_grounding("", JIOFIN_PAGE_83)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason, "no_text_anchor_in_raw_label")
+
+    def test_returns_labelgroundingresult_type(self):
+        result = check_label_grounding("Total Assets", JIOFIN_PAGE_83)
+        self.assertIsInstance(result, LabelGroundingResult)
+
+
 class TestNumbersIn(unittest.TestCase):
 
     def test_extracts_and_parses_multiple_numbers(self):
@@ -1068,6 +1123,7 @@ class TestValidateCandidates(unittest.TestCase):
         self.assertEqual(len(diagnostics), 1)
         d = diagnostics[0]
         self.assertTrue(d.l2_passed)
+        self.assertTrue(d.l3_passed)
         self.assertTrue(d.l4_passed)
         self.assertTrue(d.l5_passed)
         self.assertFalse(d.l5_degraded)
@@ -1087,6 +1143,7 @@ class TestValidateCandidates(unittest.TestCase):
         self.assertEqual(accepted, [candidate])
         d = diagnostics[0]
         self.assertTrue(d.l2_passed)
+        self.assertTrue(d.l3_passed)
         self.assertTrue(d.l4_passed)
         self.assertTrue(d.l5_passed)
         self.assertEqual(d.rejection_reasons, [])
@@ -1100,6 +1157,7 @@ class TestValidateCandidates(unittest.TestCase):
         self.assertEqual(accepted, [candidate])
         d = diagnostics[0]
         self.assertTrue(d.l2_passed)
+        self.assertTrue(d.l3_passed)
         self.assertTrue(d.l4_passed)
         self.assertTrue(d.l5_passed)
         self.assertEqual(d.rejection_reasons, [])
@@ -1132,6 +1190,11 @@ class TestValidateCandidates(unittest.TestCase):
         # of L4/L5, exactly as the frozen design intends -- a candidate can
         # be numerically and evidentially correct while still failing on
         # label grounding alone.
+        #
+        # This hint-echoed phrase also never appears verbatim on the page
+        # (it's copied from the synonym-hints block, not the document), so
+        # L3 independently rejects it too -- both raw_label_mismatch (L2)
+        # and raw_label_not_grounded (L3) are expected now.
         candidate = _make_candidate(
             "net_profit",
             "Profit for the year, profit for the period, profit after tax",
@@ -1142,26 +1205,33 @@ class TestValidateCandidates(unittest.TestCase):
         self.assertEqual(accepted, [])
         d = diagnostics[0]
         self.assertFalse(d.l2_passed)
+        self.assertFalse(d.l3_passed)
         self.assertTrue(d.l4_passed)
         self.assertTrue(d.l5_passed)
         self.assertFalse(d.l5_degraded)
-        self.assertEqual(d.rejection_reasons, ["raw_label_mismatch"])
+        self.assertEqual(len(d.rejection_reasons), 2)
+        self.assertIn("raw_label_mismatch", d.rejection_reasons)
+        self.assertTrue(any(r.startswith("raw_label_not_grounded:") for r in d.rejection_reasons))
 
     def test_l4_failure_cascades_to_degraded_l5(self):
         # "Gross profit/(loss)" passes L2 (after the regex fix) but does not
         # appear anywhere on TataSteel's income statement page at all --
         # L4 fails, and L5 runs in degraded (diagnostic-only) mode as a
-        # consequence, never counting toward acceptance.
+        # consequence, never counting toward acceptance. Since the label
+        # itself is absent from the page, L3 independently fails too (it
+        # searches the same text_block L4 does).
         candidate = _make_candidate("gross_profit", "Gross profit/(loss)", 8706.94, "Gross profit/(loss)")
         accepted, diagnostics = validate_candidates([candidate], TATASTEEL_PAGE_283)
         self.assertEqual(accepted, [])
         d = diagnostics[0]
         self.assertTrue(d.l2_passed)
+        self.assertFalse(d.l3_passed)
         self.assertFalse(d.l4_passed)
         self.assertFalse(d.l5_passed)
         self.assertTrue(d.l5_degraded)
-        self.assertEqual(len(d.rejection_reasons), 1)
-        self.assertTrue(d.rejection_reasons[0].startswith("evidence_not_grounded:"))
+        self.assertEqual(len(d.rejection_reasons), 2)
+        self.assertTrue(any(r.startswith("raw_label_not_grounded:") for r in d.rejection_reasons))
+        self.assertTrue(any(r.startswith("evidence_not_grounded:") for r in d.rejection_reasons))
         # No redundant value-grounding reason when L4 already failed.
         self.assertFalse(any(r.startswith("value_not_grounded") for r in d.rejection_reasons))
 
@@ -1171,6 +1241,13 @@ class TestValidateCandidates(unittest.TestCase):
         # real and in order), but the declared value does not correspond to
         # any of them -- L5 correctly rejects it. This is the case that
         # motivated keeping L2/L4/L5 as independent, all-run checks.
+        #
+        # This is also a real instance of the label-fidelity bug class L3
+        # exists to catch: raw_label "Gross profit/(loss)" itself is absent
+        # from the page (TataSteel's P&L has no such line item at all --
+        # see TestCheckLabelGrounding), even though a separate, genuinely
+        # grounded evidence field let it pass L4. L3 now independently
+        # rejects it too.
         candidate = _make_candidate(
             "gross_profit", "Gross profit/(loss)", 8706.94,
             "(a)\nCost of materials consumed\n44,088.93\n(b)\n"
@@ -1186,10 +1263,13 @@ class TestValidateCandidates(unittest.TestCase):
         self.assertEqual(accepted, [])
         d = diagnostics[0]
         self.assertTrue(d.l2_passed)
+        self.assertFalse(d.l3_passed)
         self.assertTrue(d.l4_passed)
         self.assertFalse(d.l5_passed)
         self.assertFalse(d.l5_degraded)
-        self.assertEqual(d.rejection_reasons, ["value_not_grounded:value_not_grounded"])
+        self.assertEqual(len(d.rejection_reasons), 2)
+        self.assertTrue(any(r.startswith("raw_label_not_grounded:") for r in d.rejection_reasons))
+        self.assertIn("value_not_grounded:value_not_grounded", d.rejection_reasons)
 
     def test_mixed_batch_returns_only_fully_passing_candidates_in_order(self):
         # A realistic mixed batch from a single statement-type call: one
@@ -1242,6 +1322,57 @@ class TestValidateCandidates(unittest.TestCase):
         self.assertEqual(d.raw_label, "Revenue from operations")
         self.assertEqual(d.value, 132516.66)
         self.assertEqual(d.year, 2025)
+
+
+class TestValidateCandidatesL3Regression(unittest.TestCase):
+    """
+    Full-pipeline regression coverage for the confirmed Jio Financial
+    Services label-fidelity bug: a fabricated-but-internally-consistent
+    raw_label ("Current assets", canonically valid, but never on the
+    source page) reaching a real candidate that would otherwise pass L2,
+    L4, and L5 cleanly. Before L3 existed this candidate was accepted;
+    it must now be rejected.
+    """
+
+    def test_jiofin_fabricated_current_assets_now_rejected(self):
+        # Reproduces the confirmed bug exactly: canonical_name/value match
+        # the real persisted Jio row (extraction_outputs/57bd82972001/
+        # 57bd82972001_resolved_metrics.csv: current_assets=63.09,
+        # raw_label="Current assets", page 83), with evidence built from
+        # the real source line that value actually comes from ("Total
+        # Non-financial assets\n 63.09") -- genuinely grounded, so L4/L5
+        # would both pass on their own. Only L3, checking raw_label itself
+        # against the page, catches the fabrication.
+        candidate = _make_candidate(
+            "current_assets", "Current assets", 63.09,
+            "Total Non-financial assets\n 63.09", statement_type="balance_sheet",
+        )
+        accepted, diagnostics = validate_candidates([candidate], JIOFIN_PAGE_83)
+        self.assertEqual(accepted, [])
+        d = diagnostics[0]
+        self.assertTrue(d.l2_passed)   # "Current assets" maps to current_assets fine
+        self.assertFalse(d.l3_passed)  # but never appears on the page
+        self.assertTrue(d.l4_passed)   # evidence field is genuinely grounded
+        self.assertTrue(d.l5_passed)   # value field is genuinely grounded
+        self.assertEqual(len(d.rejection_reasons), 1)
+        self.assertTrue(d.rejection_reasons[0].startswith("raw_label_not_grounded:"))
+
+    def test_existing_valid_jiofin_candidates_still_pass_with_l3_enabled(self):
+        # Confirms L3 does not regress genuinely correct candidates: same
+        # page, real raw_label/evidence/value combination, must still be
+        # fully accepted end-to-end.
+        candidate = _make_candidate(
+            "total_assets", "Total Assets", 25095.53,
+            "Total Assets\n25,095.53 \n24,473.83", statement_type="balance_sheet",
+        )
+        accepted, diagnostics = validate_candidates([candidate], JIOFIN_PAGE_83)
+        self.assertEqual(accepted, [candidate])
+        d = diagnostics[0]
+        self.assertTrue(d.l2_passed)
+        self.assertTrue(d.l3_passed)
+        self.assertTrue(d.l4_passed)
+        self.assertTrue(d.l5_passed)
+        self.assertEqual(d.rejection_reasons, [])
 
 
 # ---------------------------------------------------------------------------

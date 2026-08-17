@@ -69,6 +69,12 @@ class RatioProvenance:
     result:          Optional[float]
     year:            int
     source_pages:    list[int]
+    # Set only when the scope-consistency guard (_scope_guard) blocked this
+    # ratio because its inputs came from different reporting scopes
+    # (e.g. consolidated revenue vs standalone total_assets). None means
+    # either the ratio computed normally or was already None for an
+    # unrelated reason (missing input, zero denominator).
+    scope_warning:   Optional[str] = None
 
 
 @dataclass
@@ -228,6 +234,7 @@ def _build_provenance(
     year: int,
     resolved_df: pd.DataFrame,
     metrics_used: list[str],
+    scope_warning: Optional[str] = None,
 ) -> RatioProvenance:
     """Collect page_no values from resolved_df for every metric used in the ratio."""
     pages: list[int] = []
@@ -250,7 +257,94 @@ def _build_provenance(
         result=result,
         year=year,
         source_pages=pages,
+        scope_warning=scope_warning,
     )
+
+
+# ---------------------------------------------------------------------------
+# Ratio scope-consistency guard
+#
+# Confirmed bug (Jio Financial Services asset_turnover, 2026-08):
+# build_resolved_metrics_df() resolves each canonical metric independently
+# (ranked per-metric by consolidated>standalone, confidence, source), with
+# no cross-metric consistency enforcement. A ratio's numerator and
+# denominator can therefore each be individually well-grounded and still
+# combine values from different reporting scopes -- Jio's displayed
+# asset_turnover divided CONSOLIDATED revenue (page 111) by STANDALONE
+# total_assets (page 83), producing a technically-computable but
+# financially invalid 0.081405 (~5.3x smaller than the correct consolidated
+# value). This guard uses resolved_df's existing section_type column (no
+# new reporting-scope model) to block a ratio outright when two or more of
+# its actually-present inputs carry different KNOWN scopes for that year.
+# ---------------------------------------------------------------------------
+
+def _metric_scope(resolved_df: pd.DataFrame, metric_name: str, year: int) -> Optional[str]:
+    """
+    Return the section_type ("standalone" | "consolidated") resolved_df
+    recorded for `metric_name` in `year`, or None if unknown/unavailable.
+
+    "unknown" (the classifier/LLM's own explicit sentinel for "could not
+    tell which section this page belongs to") is treated identically to
+    "not found" -- it is not a real, comparable scope value, and treating
+    it as one would create false mismatches between a confidently-scoped
+    metric and a merely ambiguously-scoped one, which is a different
+    problem than the one this guard targets.
+    """
+    if resolved_df is None or resolved_df.empty:
+        return None
+    if "metric_name" not in resolved_df.columns or "section_type" not in resolved_df.columns:
+        return None
+
+    mask = resolved_df["metric_name"] == metric_name
+    if "year" in resolved_df.columns:
+        mask &= resolved_df["year"] == year
+
+    for val in resolved_df.loc[mask, "section_type"].dropna():
+        val = str(val)
+        if val and val != "unknown":
+            return val
+    return None
+
+
+def _scope_guard(
+    ratio_name: str,
+    metrics_used: list[str],
+    values: dict[str, Optional[float]],
+    resolved_df: pd.DataFrame,
+    year: int,
+    warn_list: list[str],
+) -> Optional[str]:
+    """
+    Check that every actually-present input in `metrics_used` shares one
+    known reporting scope for `year`. Only inputs with BOTH a value
+    (values.get(m) is not None) AND a known, non-"unknown" scope
+    participate -- a missing input already yields None via _safe_div on
+    its own and carries no scope claim to check, and an ambiguous scope
+    must not manufacture a false mismatch (see _metric_scope). This is
+    deliberately fail-open: if fewer than two inputs have a determinable
+    scope, the ratio computes exactly as it did before this guard existed.
+
+    Returns None if scope-consistent (including the vacuous case), else a
+    reason string identifying the conflicting scopes. The caller is
+    responsible for nulling the ratio result and recording the reason in
+    both warn_list (via this function) and the ratio's RatioProvenance.
+    """
+    scopes: dict[str, str] = {}
+    for m in metrics_used:
+        if values.get(m) is None:
+            continue
+        scope = _metric_scope(resolved_df, m, year)
+        if scope:
+            scopes[m] = scope
+
+    if len(set(scopes.values())) <= 1:
+        return None
+
+    detail = ", ".join(f"{m}={s}" for m, s in sorted(scopes.items()))
+    warn_list.append(
+        f"{ratio_name} ({year}): inputs span different reporting scopes ({detail}); ratio suppressed"
+    )
+    return f"scope_mismatch: {detail}"
 
 
 # ---------------------------------------------------------------------------
@@ -272,11 +366,15 @@ def _compute_year(
         return row.get(col)
 
     def prov(ratio_name, formula_str, num_name, den_name,
-             num_val, den_val, result, metrics_used):
+             num_val, den_val, result, metrics_used, scope_warning=None):
         prov_list.append(_build_provenance(
             ratio_name, formula_str, num_name, den_name,
             num_val, den_val, result, year, resolved_df, metrics_used,
+            scope_warning=scope_warning,
         ))
+
+    def scope_guard(ratio_name, metrics_used):
+        return _scope_guard(ratio_name, metrics_used, row, resolved_df, year, warn_list)
 
     yr = YearResult(doc_id=doc_id, year=year)
 
@@ -294,15 +392,17 @@ def _compute_year(
     cl  = g("current_liabilities")
     ce  = g("cash_and_equivalents")
 
-    yr.current_ratio = _safe_div(ca, cl, "current_ratio", warn_list)
+    current_ratio_scope = scope_guard("current_ratio", ["current_assets", "current_liabilities"])
+    yr.current_ratio = None if current_ratio_scope else _safe_div(ca, cl, "current_ratio", warn_list)
     prov("current_ratio", "current_assets / current_liabilities",
          "current_assets", "current_liabilities", ca, cl, yr.current_ratio,
-         ["current_assets", "current_liabilities"])
+         ["current_assets", "current_liabilities"], scope_warning=current_ratio_scope)
 
-    yr.cash_ratio = _safe_div(ce, cl, "cash_ratio", warn_list)
+    cash_ratio_scope = scope_guard("cash_ratio", ["cash_and_equivalents", "current_liabilities"])
+    yr.cash_ratio = None if cash_ratio_scope else _safe_div(ce, cl, "cash_ratio", warn_list)
     prov("cash_ratio", "cash_and_equivalents / current_liabilities",
          "cash_and_equivalents", "current_liabilities", ce, cl, yr.cash_ratio,
-         ["cash_and_equivalents", "current_liabilities"])
+         ["cash_and_equivalents", "current_liabilities"], scope_warning=cash_ratio_scope)
 
     # ── 3b. Leverage ──────────────────────────────────────────────────────
     te  = g("total_equity")
@@ -311,22 +411,27 @@ def _compute_year(
     op  = g("operating_profit")
     ie  = g("interest_expense")
 
-    yr.debt_to_equity = _safe_div(yr.total_debt, te, "debt_to_equity", warn_list)
+    debt_to_equity_scope = scope_guard(
+        "debt_to_equity", ["long_term_debt", "short_term_debt", "total_equity"],
+    )
+    yr.debt_to_equity = None if debt_to_equity_scope else _safe_div(yr.total_debt, te, "debt_to_equity", warn_list)
     prov("debt_to_equity", "total_debt / total_equity",
          "total_debt", "total_equity", yr.total_debt, te, yr.debt_to_equity,
-         ["long_term_debt", "short_term_debt", "total_equity"])
+         ["long_term_debt", "short_term_debt", "total_equity"], scope_warning=debt_to_equity_scope)
 
-    yr.debt_ratio = _safe_div(tl, ta, "debt_ratio", warn_list)
+    debt_ratio_scope = scope_guard("debt_ratio", ["total_liabilities", "total_assets"])
+    yr.debt_ratio = None if debt_ratio_scope else _safe_div(tl, ta, "debt_ratio", warn_list)
     prov("debt_ratio", "total_liabilities / total_assets",
          "total_liabilities", "total_assets", tl, ta, yr.debt_ratio,
-         ["total_liabilities", "total_assets"])
+         ["total_liabilities", "total_assets"], scope_warning=debt_ratio_scope)
 
-    yr.interest_coverage = _safe_div(op, ie, "interest_coverage", warn_list)
+    interest_coverage_scope = scope_guard("interest_coverage", ["operating_profit", "interest_expense"])
+    yr.interest_coverage = None if interest_coverage_scope else _safe_div(op, ie, "interest_coverage", warn_list)
     if _nan(ie):
         warn_list.append(f"interest_coverage NaN for {year}: interest_expense missing")
     prov("interest_coverage", "operating_profit / interest_expense",
          "operating_profit", "interest_expense", op, ie, yr.interest_coverage,
-         ["operating_profit", "interest_expense"])
+         ["operating_profit", "interest_expense"], scope_warning=interest_coverage_scope)
 
     # ── 3c. Profitability ─────────────────────────────────────────────────
     rev = g("revenue")
@@ -336,42 +441,60 @@ def _compute_year(
     if not _nan(rev) and rev == 0:
         warn_list.append(f"Revenue is 0 for {year}; margin ratios set to NaN")
 
-    yr.profit_margin    = _safe_div(np_, rev, "profit_margin",    warn_list)
-    yr.operating_margin = _safe_div(op,  rev, "operating_margin", warn_list)
-    yr.gross_margin     = _safe_div(gp,  rev, "gross_margin",     warn_list)
-    yr.asset_turnover   = _safe_div(rev, ta,  "asset_turnover",   warn_list)
+    # Confirmed bug reproduction: this is the exact ratio (revenue vs
+    # total_assets) that mixed Jio's consolidated revenue with standalone
+    # total_assets. asset_turnover is structurally the highest-risk ratio
+    # here since revenue (income_statement) and total_assets (balance_sheet)
+    # are selected/extracted via independent select_pages() calls.
+    profit_margin_scope    = scope_guard("profit_margin",    ["net_profit", "revenue"])
+    operating_margin_scope = scope_guard("operating_margin", ["operating_profit", "revenue"])
+    gross_margin_scope     = scope_guard("gross_margin",     ["gross_profit", "revenue"])
+    asset_turnover_scope   = scope_guard("asset_turnover",   ["revenue", "total_assets"])
+
+    yr.profit_margin    = None if profit_margin_scope    else _safe_div(np_, rev, "profit_margin",    warn_list)
+    yr.operating_margin = None if operating_margin_scope else _safe_div(op,  rev, "operating_margin", warn_list)
+    yr.gross_margin     = None if gross_margin_scope     else _safe_div(gp,  rev, "gross_margin",     warn_list)
+    yr.asset_turnover   = None if asset_turnover_scope   else _safe_div(rev, ta,  "asset_turnover",   warn_list)
 
     prov("profit_margin",    "net_profit / revenue",
          "net_profit", "revenue", np_, rev, yr.profit_margin,
-         ["net_profit", "revenue"])
+         ["net_profit", "revenue"], scope_warning=profit_margin_scope)
     prov("operating_margin", "operating_profit / revenue",
          "operating_profit", "revenue", op, rev, yr.operating_margin,
-         ["operating_profit", "revenue"])
+         ["operating_profit", "revenue"], scope_warning=operating_margin_scope)
     prov("gross_margin",     "gross_profit / revenue",
          "gross_profit", "revenue", gp, rev, yr.gross_margin,
-         ["gross_profit", "revenue"])
+         ["gross_profit", "revenue"], scope_warning=gross_margin_scope)
     prov("asset_turnover",   "revenue / total_assets",
          "revenue", "total_assets", rev, ta, yr.asset_turnover,
-         ["revenue", "total_assets"])
+         ["revenue", "total_assets"], scope_warning=asset_turnover_scope)
 
     # ── 3d. Cash Flow ─────────────────────────────────────────────────────
     ocf  = g("operating_cash_flow")
     capex = g("capex")
 
-    yr.ocf_to_revenue = _safe_div(ocf, rev, "ocf_to_revenue", warn_list)
+    ocf_to_revenue_scope = scope_guard("ocf_to_revenue", ["operating_cash_flow", "revenue"])
+    yr.ocf_to_revenue = None if ocf_to_revenue_scope else _safe_div(ocf, rev, "ocf_to_revenue", warn_list)
     prov("ocf_to_revenue", "operating_cash_flow / revenue",
          "operating_cash_flow", "revenue", ocf, rev, yr.ocf_to_revenue,
-         ["operating_cash_flow", "revenue"])
+         ["operating_cash_flow", "revenue"], scope_warning=ocf_to_revenue_scope)
 
     # free_cash_flow = ocf - abs(capex); if capex NaN treat as 0
-    if not _nan(ocf):
+    free_cash_flow_scope = scope_guard("free_cash_flow", ["operating_cash_flow", "capex"])
+    if not _nan(ocf) and not free_cash_flow_scope:
         capex_abs = abs(capex) if not _nan(capex) else 0.0
         yr.free_cash_flow = ocf - capex_abs  # type: ignore[operator]
     prov("free_cash_flow", "operating_cash_flow - abs(capex)",
          "operating_cash_flow", "capex", ocf, capex, yr.free_cash_flow,
-         ["operating_cash_flow", "capex"])
+         ["operating_cash_flow", "capex"], scope_warning=free_cash_flow_scope)
 
     # ── 3e. YoY Growth (requires previous year) ───────────────────────────
+    # No scope guard here: each YoY formula compares ONE metric_name against
+    # ITSELF across two years (e.g. revenue[year] vs revenue[year-1]), never
+    # two different metrics within the same year -- so the cross-metric
+    # scope-mixing bug class this milestone targets cannot occur here by
+    # construction. Requiring the two years' own scopes to match as well
+    # would be a different, broader check than what the confirmed bug needs.
     if prev_row is not None:
         def _yoy(curr_val, prev_val, name) -> Optional[float]:
             if _nan(curr_val) or _nan(prev_val) or prev_val == 0:
