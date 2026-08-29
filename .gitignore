@@ -24,6 +24,8 @@ files3.md
 !docs/ARCHITECTURE.md
 !PROJECT_STATUS.md
 !frontend/README.md
+!CLAUDE.md
+!benchmark/gold/v0.1/README.md
 
 # Python
 __pycache__/
