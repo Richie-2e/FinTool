@@ -1,21 +1,68 @@
 # FinTool Backend API
 
-**Status: frozen.** Every endpoint and response schema documented here is the
-current contract. Do not change existing request/response shapes without a
-deliberate, explicit decision — the frontend (`frontend/src/api/types.ts`)
-and any other consumer depend on them exactly as written. New functionality
-(e.g. the upcoming Risk Identification module) should be added as **new**
-endpoints, not by changing these.
+**Status: stable, additive-only by convention.** Existing fields are not
+removed or renamed without a deliberate, explicit decision — the frontend
+(`frontend/src/api/types.ts`) and any other consumer depend on them exactly
+as written. New functionality (e.g. a future Risk Identification module)
+should be added as **new** endpoints, not by changing these. Response shapes
+have grown additively as the system evolved — most recently, the
+Trust/Verification fields described below — so this document reflects the
+current shapes, not a historical snapshot; keep it in sync when a schema
+changes.
 
-All request/response examples below are real captures from live
-verification runs against the benchmark corpus during this project's
-development — not hand-written samples.
+Request/response examples below are adapted from live verification runs
+against the benchmark corpus, extended with the Trust/Verification fields
+each endpoint now returns (field names/semantics confirmed directly against
+`backend/models/schemas.py` and `extraction/llm/structural_validator.py`,
+not assumed).
 
 Base URL: configurable, no default baked into the backend. Locally this is
 typically `http://localhost:8000` (`uvicorn backend.main:app --port 8000`).
 
 Source of truth for types: `backend/models/schemas.py` (Pydantic) and
 `frontend/src/api/types.ts` (TypeScript, generated to mirror it 1:1).
+
+---
+
+## Trust / Verification Semantics
+
+Every resolved metric carries a `verification_state`; every computed ratio
+and risk classification carries a `verification_states` map keyed by
+ratio/risk name. Both are produced by L6 structural validation
+(`extraction/llm/structural_validator.py::validate_one()`) and, for ratios/
+risks, aggregated by `backend/services/verification_service.py`. The
+possible values, exactly as the current implementation produces them:
+
+- **`"VERIFIED"`** — the candidate's row, column, and year were uniquely and
+  unambiguously located in the document's own structural table (via PyMuPDF
+  `find_tables()`), and the cell there matches the reported value. This is a
+  **structural self-consistency check**, not independent fact-checking
+  against any source outside the document itself.
+- **`"NEEDS_REVIEW"`** — L2–L5 passed, but L6 could not establish sufficient
+  structural consistency to reach `VERIFIED`: no structural table was
+  available for the page, the value/year combination matched more than one
+  row, the matched row's column mapped to a different or ambiguous year, or
+  the candidate's label and its value landed on different rows.
+  `NEEDS_REVIEW` is not a claim that the value is wrong — only that the
+  automated structural check could not confirm it with certainty.
+- **`"REJECTED"`** (never appears in an API response) — reserved for one
+  narrow case: the candidate's `raw_label` uniquely identifies exactly one
+  structural row, that row's column for the declared year is unambiguous,
+  and the cell there holds a *different*, real number — an actual
+  structural contradiction, not merely an inability to confirm. A rejected
+  candidate is removed before persistence, so its absence from `/metrics`
+  *is* the signal.
+- **`null`** — no structural check was performed for this value at all
+  (e.g. the candidate came from the V1 regex-fallback extractor, which
+  never runs L6). `null` means "not checked," never "VERIFIED" and never
+  "confirmed wrong."
+
+**What `VERIFIED` does NOT mean**: FinTool has not independently proven that
+a reported financial figure is factually true. `VERIFIED` means the value
+is *structurally self-consistent* with what the source PDF's own table
+layout shows for that row/column/year. Do not present `VERIFIED` to a user
+as "confirmed correct" or "fact-checked" — present it as "passed FinTool's
+structural consistency check."
 
 ---
 
@@ -119,7 +166,9 @@ populated when `status == "failed"`.
 
 ## `GET /metrics/{doc_id}`
 
-Every resolved (LLM-extracted, L2/L4/L5-validated) raw metric row.
+Every resolved (LLM-extracted, L2–L6-validated) raw metric row. See "Trust /
+Verification Semantics" above for `evidence`/`table_id`/`row_index`/
+`col_index`/`verification_state`/`verification_reason`.
 
 **Response 200** (truncated to 2 of 8 rows for brevity):
 ```json
@@ -137,7 +186,13 @@ Every resolved (LLM-extracted, L2/L4/L5-validated) raw metric row.
       "raw_label": "Profit for the Year (A)",
       "confidence": "high",
       "statement_type": "income_statement",
-      "section_type": "consolidated"
+      "section_type": "consolidated",
+      "evidence": "Profit for the Year (A)\n1,604.55\n1,612.59",
+      "table_id": "111_t0",
+      "row_index": 12,
+      "col_index": 2,
+      "verification_state": "VERIFIED",
+      "verification_reason": "row 12 uniquely identified by value+year; column matches declared year 2024"
     },
     {
       "metric_name": "total_assets",
@@ -148,7 +203,13 @@ Every resolved (LLM-extracted, L2/L4/L5-validated) raw metric row.
       "raw_label": "Total Assets",
       "confidence": "high",
       "statement_type": "balance_sheet",
-      "section_type": "standalone"
+      "section_type": "standalone",
+      "evidence": "Total Assets\n25,095.53\n24,473.83",
+      "table_id": null,
+      "row_index": null,
+      "col_index": null,
+      "verification_state": "NEEDS_REVIEW",
+      "verification_reason": "no structural table available for this page -- row/column identity unverifiable from structure alone"
     }
   ],
   "quality_report": {
@@ -177,7 +238,14 @@ unreadable — this is non-fatal, callers should handle its absence.
 
 14 computed ratios per year, from `numerical_module.compute()`. Any ratio
 whose numerator/denominator wasn't resolved is `null` — this is expected,
-not an error.
+not an error. Each `RatioItem` also carries `verification_states`, a map
+with all 14 ratio names as keys (`backend/services/verification_service.py`
+always populates every key, not just computable ratios). A ratio's value is
+`"VERIFIED"` only if every one of its numerator/denominator resolved
+metrics is itself `VERIFIED`; `"NEEDS_REVIEW"` if any input is
+`NEEDS_REVIEW`; `null` if the ratio itself is `null`/not computable, or if
+none of its inputs were structurally checked. See "Trust / Verification
+Semantics" above.
 
 **Response 200:**
 ```json
@@ -191,7 +259,14 @@ not an error.
       "debt_ratio": null, "interest_coverage": null, "profit_margin": null,
       "operating_margin": null, "gross_margin": null, "asset_turnover": null,
       "ocf_to_revenue": null, "free_cash_flow": null,
-      "yoy_revenue_growth": null, "yoy_profit_growth": null, "total_debt": null
+      "yoy_revenue_growth": null, "yoy_profit_growth": null, "total_debt": null,
+      "verification_states": {
+        "current_ratio": null, "cash_ratio": null, "debt_to_equity": null,
+        "debt_ratio": null, "interest_coverage": null, "profit_margin": null,
+        "operating_margin": null, "gross_margin": null, "asset_turnover": null,
+        "ocf_to_revenue": null, "free_cash_flow": null,
+        "yoy_revenue_growth": null, "yoy_profit_growth": null, "total_debt": null
+      }
     },
     {
       "year": 2025,
@@ -201,7 +276,16 @@ not an error.
       "gross_margin": null, "asset_turnover": 0.08140533393795629,
       "ocf_to_revenue": null, "free_cash_flow": null,
       "yoy_revenue_growth": null, "yoy_profit_growth": 0.005010750677760097,
-      "total_debt": null
+      "total_debt": null,
+      "verification_states": {
+        "current_ratio": null, "cash_ratio": null, "debt_to_equity": null,
+        "debt_ratio": "VERIFIED", "interest_coverage": null,
+        "profit_margin": "NEEDS_REVIEW", "operating_margin": null,
+        "gross_margin": null, "asset_turnover": "VERIFIED",
+        "ocf_to_revenue": null, "free_cash_flow": null,
+        "yoy_revenue_growth": null, "yoy_profit_growth": null,
+        "total_debt": null
+      }
     }
   ]
 }
@@ -216,7 +300,10 @@ not an error.
 4 risk classifications (liquidity, debt, profitability, cashflow) plus an
 overall rating, per year. **Not currently used by the frontend** — it exists
 and works, but no UI consumes it yet (candidate for a future frontend
-addition, not new backend work).
+addition, not new backend work). Each `RiskItem` also carries
+`verification_states`, a 5-key map (`liquidity`, `debt`, `profitability`,
+`cashflow`, `overall`) mirroring `RatioItem`'s pattern — see "Trust /
+Verification Semantics" above.
 
 **Response 200** (one year shown):
 ```json
@@ -241,7 +328,14 @@ addition, not new backend work).
       "cashflow_risk": "Low",
       "cashflow_value": 23879.91,
       "cashflow_threshold": "< 0 = High, 0-100 Cr = Medium, >= 100 Cr = Low",
-      "overall_risk": "High"
+      "overall_risk": "High",
+      "verification_states": {
+        "liquidity": "VERIFIED",
+        "debt": null,
+        "profitability": null,
+        "cashflow": "VERIFIED",
+        "overall": "VERIFIED"
+      }
     }
   ]
 }
@@ -342,7 +436,13 @@ not a bug.)
       "unit": "₹ in crore",
       "page_no": 111,
       "raw_label": "Profit for the Year (A)",
-      "source": "income_statement"
+      "source": "income_statement",
+      "evidence": "Profit for the Year (A)\n1,604.55\n1,612.59",
+      "verification_state": "VERIFIED",
+      "verification_reason": "row 12 uniquely identified by value+year; column matches declared year 2025",
+      "table_id": "111_t0",
+      "row_index": 12,
+      "col_index": 1
     },
     {
       "metric": "revenue",
@@ -350,16 +450,27 @@ not a bug.)
       "unit": "₹ in crore",
       "page_no": 111,
       "raw_label": "Revenue from Operations",
-      "source": "income_statement"
+      "source": "income_statement",
+      "evidence": null,
+      "verification_state": "NEEDS_REVIEW",
+      "verification_reason": "no structural table available for this page -- row/column identity unverifiable from structure alone",
+      "table_id": null,
+      "row_index": null,
+      "col_index": null
     }
   ],
   "risk_classification": {
     "risk_type": "profitability",
     "level": "Low",
     "threshold_applied": "< 0 = High, 0-5% = Medium, >= 5% = Low"
-  }
+  },
+  "verification_state": "NEEDS_REVIEW"
 }
 ```
+`verification_state` at the top level is the ratio's own worst-case state
+across its inputs (`backend/services/verification_service.py`) — `null` if
+the ratio itself has no `result` (never computed), independent of whether
+any individual input resolved.
 
 `risk_classification` is `null` for ratios outside the 3 risk-mapped metrics
 (`current_ratio`, `debt_to_equity`, `profit_margin`) — e.g. `free_cash_flow`

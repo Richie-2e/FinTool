@@ -23,7 +23,7 @@ frontend/
   src/
     main.tsx                 # entry point — mounts <App /> into #root
     App.tsx                  # workflow state machine (see below)
-    index.css                # minimal global styles, no framework
+    index.css                # design tokens + component styling, light/dark via prefers-color-scheme
     vite-env.d.ts            # TS typing for import.meta.env.VITE_API_BASE_URL
     api/
       client.ts              # ALL fetch() calls live here — nowhere else
@@ -35,6 +35,9 @@ frontend/
       RatiosTable.tsx
       ChatPanel.tsx
       ExplainPanel.tsx
+      VerificationBadge.tsx   # renders a metric/ratio's backend-computed verification_state
+    utils/
+      format.ts               # display-only number formatters (formatMetricValue/formatRatioValue)
 ```
 
 ## Architectural principle: components own their own data
@@ -106,10 +109,17 @@ improvement, not currently implemented.
 |---|---|---|
 | `UploadForm` | `POST /upload` | File picker, submit, surfaces validation errors from the backend (wrong file type, not a financial report, etc.) |
 | `StatusPoller` | `GET /status/{doc_id}` (polled every 3s) | Polls until `ready`/`failed`; guards against double-firing `onReady` under React StrictMode's dev-mode double-invoke |
-| `MetricsTable` | `GET /metrics/{doc_id}` | Read-only table of every resolved metric row. **Not** wired to Explain — see below |
-| `RatiosTable` | `GET /ratios/{doc_id}` | Year × ratio grid; non-null cells are clickable, opening `ExplainPanel` |
+| `MetricsTable` | `GET /metrics/{doc_id}` | Read-only table of every resolved metric row, with a per-row `VerificationBadge` and a click-to-expand detail row (evidence, source page, structural table/row/column — only rendered when present). **Not** wired to Explain — see below |
+| `RatiosTable` | `GET /ratios/{doc_id}` | Year × ratio grid; non-null cells are clickable, opening `ExplainPanel`, and carry a compact `VerificationBadge` sourced from `RatioItem.verification_states[column]` |
 | `ChatPanel` | `POST /chat` | Free-text Q&A with running conversation history, renders cited sources and any warning |
-| `ExplainPanel` | `GET /explain/{doc_id}/{metric}?year=` | Side panel showing formula, inputs, risk classification for one ratio/year |
+| `ExplainPanel` | `GET /explain/{doc_id}/{metric}?year=` | Side panel showing formula, result (with its own `VerificationBadge`), inputs (each with a compact per-input badge), risk classification, and an expandable input-detail section (verification reason, evidence, source, raw label) for one ratio/year |
+
+`VerificationBadge.tsx` is a shared component used by all three of `MetricsTable`,
+`RatiosTable`, and `ExplainPanel` — it renders the backend's `verification_state` verbatim
+(`"VERIFIED"` / `"NEEDS_REVIEW"` / `null` → a neutral "Unverified") and never computes, infers,
+or overrides it; the backend remains the sole source of truth. `utils/format.ts` provides pure,
+display-only number formatters (`formatMetricValue`, `formatRatioValue`) used alongside it —
+neither module touches the underlying values sent to or received from the API.
 
 **Why `MetricsTable` isn't clickable-to-Explain**: `/explain` only has
 provenance data for *computed ratios*, not raw resolved metrics (confirmed
