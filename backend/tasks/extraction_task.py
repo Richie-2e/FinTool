@@ -156,6 +156,12 @@ def run_extraction_pipeline(self, doc_id: str, pdf_path: str) -> None:  # noqa: 
                         statement_type = _s(row, "statement_type"),
                         section_type   = _s(row, "section_type"),
                         confidence     = _s(row, "confidence"),
+                        evidence       = _s(row, "evidence"),
+                        verification_state  = _s(row, "verification_state"),
+                        verification_reason = _s(row, "verification_reason"),
+                        table_id       = _s(row, "table_id"),
+                        row_index      = _i(row, "row_index"),
+                        col_index      = _i(row, "col_index"),
                     ))
                 db.add_all(resolved_rows)
 

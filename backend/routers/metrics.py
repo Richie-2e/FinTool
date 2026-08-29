@@ -18,6 +18,19 @@ from backend.models.schemas import (
     RiskItem,
     RisksResponse,
 )
+from backend.services.verification_service import (
+    compute_ratio_verification_states,
+    compute_risk_verification_states,
+)
+
+# Ratio names in the same order as RatioItem's fields -- used to slice the
+# per-(ratio_name, year) verification_state map into a per-year dict.
+_RATIO_NAMES: list[str] = [
+    "current_ratio", "cash_ratio", "debt_to_equity", "debt_ratio",
+    "interest_coverage", "profit_margin", "operating_margin", "gross_margin",
+    "asset_turnover", "ocf_to_revenue", "free_cash_flow",
+    "yoy_revenue_growth", "yoy_profit_growth", "total_debt",
+]
 
 router = APIRouter()
 
@@ -111,7 +124,18 @@ def get_ratios(doc_id: str, db: Session = Depends(get_db)) -> RatiosResponse:
         .all()
     )
 
-    ratios = [RatioItem.model_validate(r) for r in rows]
+    ratio_states = (
+        compute_ratio_verification_states(doc_id, doc.output_dir, db)
+        if doc.output_dir else {}
+    )
+
+    ratios = []
+    for r in rows:
+        item = RatioItem.model_validate(r)
+        item.verification_states = {
+            name: ratio_states.get((name, r.year)) for name in _RATIO_NAMES
+        }
+        ratios.append(item)
 
     return RatiosResponse(
         doc_id=doc_id,
@@ -133,6 +157,11 @@ def get_risks(doc_id: str, db: Session = Depends(get_db)) -> RisksResponse:
         .filter(ComputedMetric.doc_id == doc_id)
         .order_by(ComputedMetric.year)
         .all()
+    )
+
+    risk_states = (
+        compute_risk_verification_states(doc_id, doc.output_dir, db)
+        if doc.output_dir else {}
     )
 
     risks: list[RiskItem] = []
@@ -175,6 +204,11 @@ def get_risks(doc_id: str, db: Session = Depends(get_db)) -> RisksResponse:
             cashflow_threshold = CASHFLOW_THRESHOLD,
 
             overall_risk = row.overall_risk or "Unknown",
+
+            verification_states = {
+                key: risk_states.get((key, row.year))
+                for key in ("liquidity", "debt", "profitability", "cashflow", "overall")
+            },
         ))
 
     return RisksResponse(

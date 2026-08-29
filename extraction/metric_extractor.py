@@ -76,6 +76,16 @@ class CandidateMetric:
     confidence:     str   # "high" | "medium" | "low" | "derived"
     source:         str   # "docling_table" | "line_parse_fallback"
     evidence:       str = ""   # verbatim source snippet (LLM path only); default keeps all other call sites valid
+    # Phase B/C (structural provenance + L6) -- all optional, default None,
+    # so no existing call site needs to change. Populated by
+    # extraction/llm/structural_validator.py::run_structural_validation()
+    # when structural table data is available; left None otherwise (e.g. the
+    # V1 regex fallback path, which never runs L6).
+    verification_state:  Optional[str] = None   # "VERIFIED" | "NEEDS_REVIEW" | None (not checked)
+    verification_reason: Optional[str] = None
+    table_id:  Optional[str] = None
+    row_index: Optional[int] = None
+    col_index: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +437,8 @@ def build_resolved_metrics_df(
         empty = pd.DataFrame(columns=[
             "doc_id", "metric_name", "value", "unit", "year", "page_no",
             "raw_label", "statement_type", "section_type", "confidence", "source",
+            "evidence", "verification_state", "verification_reason",
+            "table_id", "row_index", "col_index",
         ])
         return empty, quality
 
@@ -458,9 +470,20 @@ def build_resolved_metrics_df(
     df = add_derived_totals_if_possible(df)
 
     # Enforce exact column contract
+    # "evidence" added (Phase A, next-architecture review): the verbatim
+    # grounding snippet CandidateMetric already carries -- previously computed
+    # and validated by L4/L5, then dropped here before reaching persistence.
+    # Purely additive to the contract; no existing column removed or reordered.
+    # Phase B/C: verification_state/verification_reason/table_id/row_index/
+    # col_index added -- populated by L6 (structural_validator.py) when
+    # structural table data was available for a candidate's page, else left
+    # None (e.g. V1 regex-fallback candidates, which never run L6). Purely
+    # additive; no existing column removed or reordered.
     col_order = [
         "doc_id", "metric_name", "value", "unit", "year", "page_no",
         "raw_label", "statement_type", "section_type", "confidence", "source",
+        "evidence", "verification_state", "verification_reason",
+        "table_id", "row_index", "col_index",
     ]
     resolved_df = df[col_order].reset_index(drop=True)
     quality["resolved_rows"] = len(resolved_df)

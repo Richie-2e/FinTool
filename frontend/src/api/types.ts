@@ -6,6 +6,17 @@
  * changes, update the matching interface here to keep them in sync.
  */
 
+/**
+ * The backend's L6 structural-verification outcome for a resolved value.
+ * Mirrors extraction/llm/structural_validator.py's state model exactly —
+ * this is the ONLY place verification state is computed; the frontend
+ * never derives, infers, or overrides it. `null` means "not structurally
+ * checked" (e.g. no table was available for that page), not "unverified
+ * and therefore wrong" — see VerificationBadge's docstring for the exact
+ * user-facing wording this maps to.
+ */
+export type VerificationState = "VERIFIED" | "NEEDS_REVIEW" | null;
+
 // --- Upload (UploadResponse) -----------------------------------------------
 
 export interface UploadResponse {
@@ -38,6 +49,16 @@ export interface MetricItem {
   confidence: string | null;
   statement_type: string | null;
   section_type: string | null;
+  // Already returned by GET /metrics today (backend/models/schemas.py
+  // MetricItem, via ResolvedMetric -> MetricItem.model_validate) — these
+  // fields were simply not declared here before, so the frontend silently
+  // discarded them. See TRUST_PROVENANCE_UX_ARCHITECTURE_REVIEW.md.
+  evidence: string | null;
+  table_id: string | null;
+  row_index: number | null;
+  col_index: number | null;
+  verification_state: VerificationState;
+  verification_reason: string | null;
 }
 
 export interface QualityReport {
@@ -73,6 +94,11 @@ export interface RatioItem {
   yoy_revenue_growth: number | null;
   yoy_profit_growth: number | null;
   total_debt: number | null;
+  // Already returned by GET /ratios today — worst-case verification_state
+  // per ratio name, keyed exactly as the numeric fields above (e.g.
+  // "debt_ratio"). Absent/null means "not computable" (no provenance entry
+  // for that ratio's inputs), never a claim about correctness.
+  verification_states: Record<string, VerificationState>;
 }
 
 export interface RatiosResponse {
@@ -122,6 +148,14 @@ export interface ExplainInput {
   page_no: number | null;
   raw_label: string | null;
   source: string | null;
+  // Already returned by GET /explain today — see MetricItem above for the
+  // same fields' provenance.
+  evidence: string | null;
+  verification_state: VerificationState;
+  verification_reason: string | null;
+  table_id: string | null;
+  row_index: number | null;
+  col_index: number | null;
 }
 
 export interface RiskClassification {
@@ -137,6 +171,9 @@ export interface ExplainResponse {
   result: number | null;
   inputs: ExplainInput[];
   risk_classification: RiskClassification | null;
+  // Already returned by GET /explain today — worst-case verification_state
+  // across this ratio's own inputs.
+  verification_state: VerificationState;
 }
 
 // --- Error (ErrorResponse) ---------------------------------------------------

@@ -119,7 +119,7 @@ class ExtractionPipeline:
         # ── Stage 3: Metric extraction ───────────────────────────────────────
         _log("Stage 3/4: Extracting metrics...")
         pages = {i + 1: text for i, text in enumerate(parse_result.pages_raw_text)}
-        candidates, validator_diagnostics = extract_with_llm(pages, page_classes, doc_id)
+        candidates, validator_diagnostics = extract_with_llm(pages, page_classes, doc_id, pdf_path)
         _log(f"  LLM extraction candidates: {len(candidates)}")
 
         if len(candidates) < 3:

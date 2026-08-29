@@ -120,6 +120,12 @@ def build_grounded_prompt(
     computed_metrics_rows: list,   # list of ComputedMetric ORM objects (all years)
     resolved_metrics_rows: list,   # list of ResolvedMetric ORM objects (all years) -- FV2-7
     doc_meta,                      # Document ORM object
+    ratio_verification_states: Optional[dict[tuple[str, int], Optional[str]]] = None,
+    # Downstream trust propagation: (ratio_name, year) -> "VERIFIED" |
+    # "NEEDS_REVIEW" | None, from backend/services/verification_service.py.
+    # Optional and default None for backward compatibility -- omitted,
+    # behavior (including the exact rendered COMPUTED METRICS text) is
+    # identical to before Phase B/C.
 ) -> str:
     """
     Assemble the grounded prompt per SPEC_api.md §3.6.
@@ -129,11 +135,20 @@ def build_grounded_prompt(
     # ResolvedMetric is one row per (metric_name, year) -- unlike ComputedMetric,
     # which is one row per year with a column per ratio. Index by metric name
     # first so each metric's years can be grouped and sorted together.
-    by_metric_year: dict[str, dict[int, tuple[float, Optional[str], Optional[int]]]] = {}
+    # Downstream trust propagation: getattr(..., default=None) rather than
+    # direct attribute access, since resolved_metrics_rows may be plain
+    # fixtures (e.g. test_rag_service.py's SimpleNamespace rows) that predate
+    # Phase A/B's verification_state/verification_reason columns -- absent
+    # is treated identically to "not checked" (no caveat appended), not an error.
+    by_metric_year: dict[str, dict[int, tuple[float, Optional[str], Optional[int], Optional[str], Optional[str]]]] = {}
     for row in resolved_metrics_rows:
         if row.year is None or row.value is None:
             continue
-        by_metric_year.setdefault(row.metric_name, {})[row.year] = (row.value, row.unit, row.page_no)
+        by_metric_year.setdefault(row.metric_name, {})[row.year] = (
+            row.value, row.unit, row.page_no,
+            getattr(row, "verification_state", None),
+            getattr(row, "verification_reason", None),
+        )
 
     raw_lines: list[str] = []
     for group_label, group_metrics in _RAW_METRIC_LABELS.items():
@@ -141,10 +156,20 @@ def build_grounded_prompt(
         for attr, label in group_metrics:
             years = by_metric_year.get(attr, {})
             for yr in sorted(years):
-                value, unit, page_no = years[yr]
+                value, unit, page_no, verification_state, verification_reason = years[yr]
                 unit_suffix = f" {unit}" if unit else ""
                 page_suffix = f" (page {page_no})" if page_no is not None else ""
-                group_lines.append(f"  {label} ({yr}): {value:,.2f}{unit_suffix}{page_suffix}")
+                # Caveat only NEEDS_REVIEW figures -- VERIFIED and "not
+                # checked" (None, e.g. V1-fallback-sourced metrics) render
+                # exactly as before Phase B/C, so every existing
+                # build_grounded_prompt test stays byte-identical.
+                review_suffix = (
+                    f" [NEEDS_REVIEW: {verification_reason}]"
+                    if verification_state == "NEEDS_REVIEW" else ""
+                )
+                group_lines.append(
+                    f"  {label} ({yr}): {value:,.2f}{unit_suffix}{page_suffix}{review_suffix}"
+                )
         if group_lines:
             raw_lines.append(f"{group_label}:")
             raw_lines.extend(group_lines)
@@ -162,7 +187,9 @@ def build_grounded_prompt(
         for attr, label in _RATIO_LABELS:
             val = getattr(row, attr, None)
             if val is not None:
-                metric_lines.append(f"  {label} ({yr}): {val:.4f}")
+                state = (ratio_verification_states or {}).get((attr, yr))
+                review_suffix = " [NEEDS_REVIEW]" if state == "NEEDS_REVIEW" else ""
+                metric_lines.append(f"  {label} ({yr}): {val:.4f}{review_suffix}")
         for attr, label in _RISK_LABELS:
             val = getattr(row, attr, None)
             if val:
@@ -210,6 +237,10 @@ def build_grounded_prompt(
         "- Do not say \"I think\" or \"I believe\". State facts from the sources above.\n"
         "- If the answer cannot be found in the sources above, say "
         "\"This information is not available in the uploaded document.\"\n"
+        "- Any figure above tagged [NEEDS_REVIEW] has not been confirmed to come from the "
+        "correct row/year -- if your answer uses one, say so explicitly (e.g. \"this figure "
+        "is flagged for review and may not be fully verified\") instead of stating it as a "
+        "plain established fact.\n"
     )
 
 

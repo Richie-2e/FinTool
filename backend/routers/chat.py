@@ -11,6 +11,7 @@ from backend.models.db import ComputedMetric, ResolvedMetric, get_db
 from backend.models.schemas import ChatRequest, ChatResponse, MetricUsed, SourceItem
 from backend.routers.metrics import _get_ready_doc
 from backend.services.rag_service import build_grounded_prompt, build_rag_context, call_llm
+from backend.services.verification_service import compute_ratio_verification_states
 
 router = APIRouter()
 
@@ -180,6 +181,14 @@ def post_chat(req: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
         .all()
     )
 
+    # Downstream trust propagation (Phase B/C): worst-case verification_state
+    # per ratio, so build_grounded_prompt can caveat NEEDS_REVIEW figures
+    # instead of presenting them as confidently established.
+    ratio_states = (
+        compute_ratio_verification_states(doc_id, doc.output_dir, db)
+        if doc.output_dir else {}
+    )
+
     # Build grounded prompt and call Claude
     prompt = build_grounded_prompt(
         req.question,
@@ -187,6 +196,7 @@ def post_chat(req: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
         computed_rows,
         resolved_rows,
         doc,
+        ratio_verification_states=ratio_states,
     )
 
     history = [{"role": t.role, "content": t.content} for t in req.conversation_history]

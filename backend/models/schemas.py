@@ -51,6 +51,14 @@ class MetricItem(_Base):
     confidence: Optional[str] = None
     statement_type: Optional[str] = None
     section_type: Optional[str] = None
+    evidence: Optional[str] = None
+    # Prepared for later phases (B: structural tables, C: L6 validation) --
+    # always null until those phases populate them.
+    table_id: Optional[str] = None
+    row_index: Optional[int] = None
+    col_index: Optional[int] = None
+    verification_state: Optional[str] = None
+    verification_reason: Optional[str] = None
 
 
 class QualityReport(_Base):
@@ -88,6 +96,13 @@ class RatioItem(_Base):
     yoy_revenue_growth: Optional[float] = None
     yoy_profit_growth: Optional[float] = None
     total_debt: Optional[float] = None
+    # Downstream trust propagation: per-ratio-name verification_state for
+    # this year, worst-case aggregated from each ratio's numerator/
+    # denominator resolved metrics (backend/services/verification_service.py).
+    # Not persisted -- computed on read, numerical_module.py untouched.
+    # Absent/None per ratio means "not computable" (e.g. no provenance entry
+    # for that ratio, or an input metric that was never structurally checked).
+    verification_states: dict[str, Optional[str]] = {}
 
 
 class RatiosResponse(_Base):
@@ -123,6 +138,10 @@ class RiskItem(_Base):
     cashflow_threshold: Optional[str] = None
 
     overall_risk: str
+
+    # Downstream trust propagation, mirrors RatioItem.verification_states --
+    # keys: "liquidity" | "debt" | "profitability" | "cashflow" | "overall".
+    verification_states: dict[str, Optional[str]] = {}
 
 
 class RisksResponse(_Base):
@@ -176,6 +195,12 @@ class ExplainInput(_Base):
     page_no: Optional[int] = None
     raw_label: Optional[str] = None
     source: Optional[str] = None
+    evidence: Optional[str] = None
+    verification_state: Optional[str] = None
+    verification_reason: Optional[str] = None
+    table_id: Optional[str] = None
+    row_index: Optional[int] = None
+    col_index: Optional[int] = None
 
 
 class RiskClassification(_Base):
@@ -191,6 +216,10 @@ class ExplainResponse(_Base):
     result: Optional[float] = None
     inputs: list[ExplainInput]
     risk_classification: Optional[RiskClassification] = None
+    # Downstream trust propagation: worst-case verification_state across
+    # this ratio's own inputs (see backend/services/verification_service.py).
+    # None means "not computable" -- e.g. no provenance entry for this ratio.
+    verification_state: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

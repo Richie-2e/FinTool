@@ -16,6 +16,7 @@ from backend.routers.metrics import (
     PROFITABILITY_THRESHOLD,
     _get_ready_doc,
 )
+from backend.services.verification_service import compute_ratio_verification_states
 
 router = APIRouter()
 
@@ -84,17 +85,23 @@ def _build_input(
     year: int,
     db: Session,
 ) -> Optional[ExplainInput]:
-    """Build one ExplainInput, enriching with unit/page_no/raw_label from the DB."""
+    """Build one ExplainInput, enriching with unit/page_no/raw_label/evidence from the DB."""
     if not metric_name:
         return None
     row = _db_metric(doc_id, metric_name, year, db)
     return ExplainInput(
-        metric    = metric_name,
-        value     = value,
-        unit      = row.unit           if row else None,
-        page_no   = row.page_no        if row else None,
-        raw_label = row.raw_label      if row else None,
-        source    = row.statement_type if row else None,
+        metric              = metric_name,
+        value               = value,
+        unit                = row.unit                if row else None,
+        page_no             = row.page_no              if row else None,
+        raw_label           = row.raw_label             if row else None,
+        source              = row.statement_type        if row else None,
+        evidence            = row.evidence              if row else None,
+        verification_state  = row.verification_state    if row else None,
+        verification_reason = row.verification_reason   if row else None,
+        table_id            = row.table_id              if row else None,
+        row_index           = row.row_index             if row else None,
+        col_index           = row.col_index             if row else None,
     )
 
 
@@ -176,6 +183,8 @@ def explain_metric(
                 threshold_applied=threshold_str,
             )
 
+    ratio_states = compute_ratio_verification_states(doc_id, doc.output_dir, db)
+
     return ExplainResponse(
         metric_name       = metric_name,
         formula           = entry.get("formula_str", ""),
@@ -183,4 +192,5 @@ def explain_metric(
         result            = entry.get("result"),
         inputs            = inputs,
         risk_classification = risk_classification,
+        verification_state  = ratio_states.get((metric_name, resolved_year)),
     )

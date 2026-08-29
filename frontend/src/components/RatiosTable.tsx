@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { ApiError, getRatios } from "../api/client";
 import type { RatioItem, RatiosResponse } from "../api/types";
+import { VerificationBadge } from "./VerificationBadge";
+import { formatRatioValue } from "../utils/format";
 
 interface RatiosTableProps {
   docId: string;
@@ -8,8 +10,9 @@ interface RatiosTableProps {
   onExplain: (metricName: string, year: number) => void;
 }
 
-// Every numeric key of RatioItem except `year`. Doubles as the column list.
-const RATIO_COLUMNS: (keyof Omit<RatioItem, "year">)[] = [
+// Every numeric key of RatioItem except `year`/`verification_states`.
+// Doubles as the column list.
+const RATIO_COLUMNS: Exclude<keyof RatioItem, "year" | "verification_states">[] = [
   "current_ratio",
   "cash_ratio",
   "debt_to_equity",
@@ -29,7 +32,10 @@ const RATIO_COLUMNS: (keyof Omit<RatioItem, "year">)[] = [
 /**
  * Step 4: GET /ratios/{doc_id} and render computed ratios in a year x ratio
  * grid. Every non-null cell is clickable — it opens <ExplainPanel /> for
- * that ratio/year via GET /explain/{doc_id}/{metric}?year={year}.
+ * that ratio/year via GET /explain/{doc_id}/{metric}?year={year}, which is
+ * where the full evidence/provenance breakdown lives. This grid only shows
+ * a compact verification indicator per cell (the same backend-computed
+ * state, never recomputed here) to avoid cluttering a dense table.
  */
 export function RatiosTable({ docId, onExplain }: RatiosTableProps) {
   const [data, setData] = useState<RatiosResponse | null>(null);
@@ -46,34 +52,45 @@ export function RatiosTable({ docId, onExplain }: RatiosTableProps) {
   }, [docId]);
 
   if (error) return <p className="error">{error}</p>;
-  if (!data) return <p>Loading ratios…</p>;
+  if (!data) return <p className="loading">Loading ratios…</p>;
 
   return (
     <div className="panel">
-      <h2>Computed ratios — {data.company_name ?? "Unknown company"}</h2>
-      <p className="muted">Click a value to see its formula and source (GET /explain).</p>
-      <table>
+      <div className="panel-header">
+        <h2>Computed ratios</h2>
+        <span className="muted">{data.company_name ?? "Unknown company"}</span>
+      </div>
+      <p className="muted">Click a value to see its formula, inputs, and verification detail.</p>
+      <table className="ratios-table">
         <thead>
           <tr>
             <th>Ratio</th>
             {data.ratios.map((r) => (
-              <th key={r.year}>{r.year}</th>
+              <th key={r.year} className="numeric-col">{r.year}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {RATIO_COLUMNS.map((column) => (
             <tr key={column}>
-              <td>{column}</td>
+              <td>{formatColumnLabel(column)}</td>
               {data.ratios.map((r) => {
-                const value = r[column];
+                const value = r[column] as number | null;
+                const state = r.verification_states[column] ?? null;
                 return (
                   <td
                     key={r.year}
-                    className={value !== null ? "clickable-cell" : undefined}
+                    className={value !== null ? "clickable-cell numeric-col" : "numeric-col"}
                     onClick={() => value !== null && onExplain(column, r.year)}
                   >
-                    {value ?? "—"}
+                    {value !== null ? (
+                      <span className="ratio-cell">
+                        {formatRatioValue(value)}
+                        <VerificationBadge state={state} compact />
+                      </span>
+                    ) : (
+                      "—"
+                    )}
                   </td>
                 );
               })}
@@ -84,4 +101,8 @@ export function RatiosTable({ docId, onExplain }: RatiosTableProps) {
       {data.ratios.length === 0 && <p className="muted">No computed ratios for this document.</p>}
     </div>
   );
+}
+
+function formatColumnLabel(column: string): string {
+  return column.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }

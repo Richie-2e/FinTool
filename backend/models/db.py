@@ -65,6 +65,21 @@ class ResolvedMetric(Base):
     section_type: Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
     confidence: Mapped[Optional[str]]    = mapped_column(Text, nullable=True)
 
+    # Phase A (next-architecture review): evidence is populated now — the
+    # verbatim snippet CandidateMetric.evidence already computes and L4/L5
+    # already validate, previously discarded before persistence.
+    evidence: Mapped[Optional[str]]      = mapped_column(Text, nullable=True)
+
+    # Structural provenance + verification state -- columns prepared now so
+    # later phases (B: structural tables, C: L6 validation) only need to
+    # populate them, not migrate the schema again. Unpopulated (NULL) until
+    # then; no current code path writes to them.
+    table_id: Mapped[Optional[str]]            = mapped_column(Text, nullable=True)
+    row_index: Mapped[Optional[int]]           = mapped_column(Integer, nullable=True)
+    col_index: Mapped[Optional[int]]           = mapped_column(Integer, nullable=True)
+    verification_state: Mapped[Optional[str]]  = mapped_column(Text, nullable=True)
+    verification_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
 
 class ComputedMetric(Base):
     __tablename__ = "computed_metrics"
