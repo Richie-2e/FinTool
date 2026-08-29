@@ -1,0 +1,78 @@
+{
+  "dataset_version": "v0.1",
+  "schema_version": "v0.1-frozen (source_has_no_explicit_label, derived/derivation_formula added after OFSS pilot; frozen after OFSS/Reliance/LICHSGFIN/JioFin pilots)",
+  "creation_date": "2026-08-17",
+  "benchmark_scope": "CORE_METRIC_SET (8 metrics) x up to 2 years x applicable statement types, for 5 documents",
+  "source_documents": [
+    {
+      "company_name": "Oracle Financial Services Software Limited",
+      "short_name": "OFSS",
+      "doc_id": "3840dcfd02e0"
+    },
+    {
+      "company_name": "Reliance Industries Limited",
+      "short_name": "Reliance",
+      "doc_id": "c4187424880a"
+    },
+    {
+      "company_name": "LIC Housing Finance Limited",
+      "short_name": "LICHSGFIN",
+      "doc_id": "287f1ff9bd7d"
+    },
+    {
+      "company_name": "Jio Financial Services Limited",
+      "short_name": "JioFin",
+      "doc_id": "57bd82972001"
+    },
+    {
+      "company_name": "Tata Steel Limited",
+      "short_name": "TataSteel",
+      "doc_id": "e36efb6efe4f"
+    }
+  ],
+  "labeling_status": "complete for CORE_METRIC_SET, all 5 documents",
+  "total_records": 80,
+  "records_per_document": {
+    "OFSS": 16,
+    "Reliance": 16,
+    "LICHSGFIN": 16,
+    "JioFin": 16,
+    "TataSteel": 16
+  },
+  "status_distribution": {
+    "valid": 68,
+    "ambiguous": 4,
+    "missing": 8
+  },
+  "metrics_covered": [
+    "current_assets",
+    "current_liabilities",
+    "net_profit",
+    "operating_cash_flow",
+    "revenue",
+    "total_assets",
+    "total_equity",
+    "total_liabilities"
+  ],
+  "known_failure_classes_represented": [
+    "bare_total_label_ambiguity",
+    "c1_numbered_prefix_target_case",
+    "cash_flow_intermediate_subtotal_confusion",
+    "cash_flow_pretax_subtotal_confusion_RC7",
+    "cross_statement_type_scope_inconsistency",
+    "jiofin_raw_label_evidence_field_swap",
+    "lichsgfin_no_current_noncurrent_classification",
+    "milestone1_asset_turnover_scope_mixing",
+    "nbfc_no_current_noncurrent_classification",
+    "prompt_hint_echo_raw_label",
+    "reliance_year_misattribution_not_a_scope_conflict",
+    "revenue_intermediate_subtotal_confusion",
+    "tatasteel_wrong_year_column"
+  ],
+  "unresolved_cases": [],
+  "gold_records_file": "gold_records.jsonl",
+  "gold_records_sha256": "e047b7debe6fc7bbe0aefb17bb1e959b8174e89cad840468473bb39d9feee63d",
+  "validation_errors": 0,
+  "validation_warnings": 4,
+  "no_leakage_rule": "expected_* fields derived exclusively from independent source PDF reading; pipeline/experiment outputs used only as navigation aids during labeling, never copied as gold values"
+}
