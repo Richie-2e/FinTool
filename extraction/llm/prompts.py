@@ -170,7 +170,44 @@ Output schema:
 Confidence guide:
 - high: label clearly matches, value is unambiguous, year is clear
 - medium: label is close but not exact, or year required inference
-- low: value or label was ambiguous"""
+- low: value or label was ambiguous
+
+Worked example -- a single line item with two years MUST become TWO entries:
+Source text:
+  "Revenue from operations
+  17
+  68,468
+  63,730"
+(17 is a note reference -- skip it, per rule 10. 68,468 is the first/most
+recent year's value, 63,730 is the prior year's value. BOTH are present and
+BOTH must be extracted, as two separate objects in "metrics", same
+canonical_name and raw_label, different year and value each:)
+{
+  "metrics": [
+    {
+      "canonical_name": "revenue",
+      "raw_label": "Revenue from operations",
+      "value": 68468,
+      "unit": "INR million",
+      "year": 2025,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": "Revenue from operations\\n17\\n68,468\\n63,730"
+    },
+    {
+      "canonical_name": "revenue",
+      "raw_label": "Revenue from operations",
+      "value": 63730,
+      "unit": "INR million",
+      "year": 2024,
+      "confidence": "high",
+      "section_type": "consolidated",
+      "evidence": "Revenue from operations\\n17\\n68,468\\n63,730"
+    }
+  ]
+}
+Never emit only the first of these two objects and omit the second -- a
+two-column comparative row always requires two output objects, one per year."""
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +224,13 @@ Rules:
 4. Negative values are shown in parentheses: (4,521) = -4521.
 5. Dashes (—, -) in value cells mean zero or not applicable; use null.
 6. Map each extracted item to the closest canonical_name from the list provided.
-7. If a metric appears for multiple years, extract all of them as separate entries.
+7. IMPORTANT -- Multi-year rows: if a line item's row shows values for more than
+   one year (a comparative table, e.g. "current year" and "prior year" side by
+   side), you MUST output EVERY one of those years as its own SEPARATE entry in
+   the "metrics" array -- never only the first, most recent, or left-most one.
+   Each such entry shares the same canonical_name and raw_label but has its own
+   year and its own value. A row with two year columns always produces TWO
+   metrics entries, never one. See the worked example below the output schema.
 8. Output ONLY a valid JSON object. No explanation text outside the JSON.
 9. Keep evidence snippets under 100 characters.
 10. IMPORTANT — Note reference numbers: Indian financial statements include a

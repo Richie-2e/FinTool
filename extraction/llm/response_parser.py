@@ -27,6 +27,13 @@ _VALID_CONFIDENCE = {"high", "medium", "low"}
 # Section types the LLM is instructed to use
 _VALID_SECTION_TYPES = {"consolidated", "standalone", "unknown"}
 
+# Max length for the evidence field. Widened from 200 (empirically validated:
+# EVIDENCE_PRESERVATION_EXPERIMENT_REPORT.md, FINAL_EVIDENCE_CAP_CONFIRMATION.md
+# -- recovers genuine multi-line-item evidence the model legitimately produces
+# past 200 chars, confirmed safe up to ~385 chars before a real false-acceptance
+# risk appears; 350 leaves margin on both sides).
+_EVIDENCE_MAX_CHARS = 350
+
 
 def parse_response(
     raw_result: dict,
@@ -101,7 +108,7 @@ def parse_response(
             section_type=resolved_section,
             confidence=confidence,
             source="llm_extraction",
-            evidence=str(entry.get("evidence", ""))[:200],
+            evidence=str(entry.get("evidence", ""))[:_EVIDENCE_MAX_CHARS],
         ))
 
     return candidates

@@ -314,6 +314,16 @@ _TRAILING_NOTE_REF_RE = re.compile(r"\s*\([a-z]\)$")
 # genuine leading prefix, never a number appearing elsewhere in the label.
 _LEADING_NUMBERED_PREFIX_RE = re.compile(r"^\(\d+\)\s*")
 
+# A trailing footnote-reference marker such as "*", "#", "†", "‡" (or a run
+# of them), e.g. "Net Cash Flow from Operating Activities *" -- the label
+# text itself is genuine and verbatim-present on the source page (L3 reads
+# raw_label unmodified and is unaffected by this normalisation); only this
+# function's own alias lookup fails to see past the trailing symbol.
+# Deliberately narrow: only whitespace + footnote-style punctuation,
+# anchored at the end of the string -- never touches a mid-label character
+# or strips general punctuation.
+_TRAILING_FOOTNOTE_MARKER_RE = re.compile(r"\s*[*#†‡]+$")
+
 
 def match_metric(label: str, statement_type: str | None = None) -> str | None:
     """
@@ -323,7 +333,8 @@ def match_metric(label: str, statement_type: str | None = None) -> str | None:
       1. Normalise label (strip, collapse whitespace, lowercase).
       2. Strip a leading numbered line-item prefix, if present.
       3. Strip a trailing single-letter note reference, if present.
-      4. For each candidate metric (filtered by statement_type when given):
+      4. Strip a trailing footnote-reference marker, if present.
+      5. For each candidate metric (filtered by statement_type when given):
          a. If any exclude pattern matches → skip this metric.
          b. If any pattern matches → return the metric name.
     """
@@ -333,6 +344,7 @@ def match_metric(label: str, statement_type: str | None = None) -> str | None:
     normalised = re.sub(r"\s+", " ", label.strip().lower())
     normalised = _LEADING_NUMBERED_PREFIX_RE.sub("", normalised)
     normalised = _TRAILING_NOTE_REF_RE.sub("", normalised)
+    normalised = _TRAILING_FOOTNOTE_MARKER_RE.sub("", normalised)
 
     for metric_name, spec in CANONICAL_METRICS.items():
         if statement_type and spec["statement"] != statement_type:

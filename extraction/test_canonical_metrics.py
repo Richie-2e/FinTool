@@ -130,6 +130,51 @@ class TestLeadingNumberedPrefixLICHSGFINCase(unittest.TestCase):
         )
 
 
+class TestTrailingFootnoteMarker(unittest.TestCase):
+    """
+    The real Reliance raw_label observed for operating_cash_flow, previously
+    rejected at L2 with raw_label_mismatch because no existing normalisation
+    stripped a trailing footnote symbol (see Diagnostic 1,
+    scratchpad/next_architecture_review/POST_BC_FOLLOWUP_DECISION.md and
+    FOOTNOTE_AND_L6_YEAR_DIAGNOSIS.md).
+    """
+
+    def test_reliance_real_raw_label_now_matches(self):
+        self.assertEqual(
+            match_metric("Net Cash Flow from Operating Activities *", "cash_flow"),
+            "operating_cash_flow",
+        )
+
+    def test_multiple_trailing_symbols_still_strip(self):
+        self.assertEqual(
+            match_metric("Net Cash Flow from Operating Activities **", "cash_flow"),
+            "operating_cash_flow",
+        )
+
+    def test_hash_and_dagger_symbols_also_strip(self):
+        self.assertEqual(match_metric("Total equity #", "balance_sheet"), "total_equity")
+        self.assertEqual(match_metric("Total equity †", "balance_sheet"), "total_equity")
+
+    def test_leading_prefix_and_trailing_footnote_marker_both_strip(self):
+        self.assertEqual(
+            match_metric("(1) Total equity *", "balance_sheet"), "total_equity",
+        )
+
+    def test_mid_label_asterisk_is_not_stripped(self):
+        # Guard: the regex is end-anchored; an asterisk elsewhere in the
+        # text must never be silently removed, and must not cause a match
+        # that wouldn't otherwise occur.
+        self.assertIsNone(match_metric("Total * equity nonsense", "balance_sheet"))
+
+    def test_plain_label_without_marker_unaffected(self):
+        # Non-regression: a label with no trailing marker at all must still
+        # match exactly as before this change.
+        self.assertEqual(
+            match_metric("Net Cash Flow from Operating Activities", "cash_flow"),
+            "operating_cash_flow",
+        )
+
+
 class TestLeadingNumberedPrefixExistingLabelsStillMatch(unittest.TestCase):
     """
     Non-regression: pre-existing labels with no leading numbered prefix must
