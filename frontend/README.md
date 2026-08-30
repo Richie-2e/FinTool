@@ -21,12 +21,15 @@ frontend/
       types.ts             # TypeScript interfaces mirroring
                            # backend/models/schemas.py 1:1
     components/
-      UploadForm.tsx       # Step 1 — POST /upload
-      StatusPoller.tsx     # Step 2 — polls GET /status/{doc_id} until ready
-      MetricsTable.tsx     # Step 3 — GET /metrics/{doc_id} (read-only)
-      RatiosTable.tsx      # Step 4 — GET /ratios/{doc_id} (cells open Explain)
-      ChatPanel.tsx        # Step 5 — POST /chat
-      ExplainPanel.tsx     # Step 6 — GET /explain/{doc_id}/{metric}?year=
+      UploadForm.tsx        # Step 1 — POST /upload
+      StatusPoller.tsx      # Step 2 — polls GET /status/{doc_id} until ready
+      MetricsTable.tsx      # Step 3 — GET /metrics/{doc_id} (read-only)
+      RatiosTable.tsx       # Step 4 — GET /ratios/{doc_id} (cells open Explain)
+      ChatPanel.tsx         # Step 5 — POST /chat
+      ExplainPanel.tsx      # Step 6 — GET /explain/{doc_id}/{metric}?year=
+      VerificationBadge.tsx # Shared trust-state badge (see docs/FRONTEND_GUIDE.md)
+    utils/
+      format.ts              # Display-only number formatters
 ```
 
 **Design principle**: components own their own data-fetching (each calls

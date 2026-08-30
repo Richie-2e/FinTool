@@ -68,8 +68,8 @@ Outputs land in `extraction_outputs/{doc_id}/`: `*_resolved_metrics.csv`,
 
 **The L2-L5 validated-extraction baseline is frozen** — no changes without an explicit
 decision to reopen it. **L6 structural validation (below) is a separately-approved, additive
-milestone on top of that frozen baseline**, not a reopening of it; see `CLAUDE.md` for the
-current change-control state.
+milestone on top of that frozen baseline**, not a reopening of it; see `PROJECT_STATUS.md`
+for the current baseline and change-control state.
 
 #### L6 structural validation
 
