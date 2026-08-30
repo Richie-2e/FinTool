@@ -107,6 +107,42 @@ export interface RatiosResponse {
   ratios: RatioItem[];
 }
 
+// --- Risks (RiskItem, RisksResponse) -----------------------------------------
+
+export interface RiskItem {
+  year: number;
+
+  liquidity_risk: string;
+  liquidity_ratio_used: string | null;
+  liquidity_ratio_value: number | null;
+  liquidity_threshold: string | null;
+
+  debt_risk: string;
+  debt_ratio_used: string | null;
+  debt_ratio_value: number | null;
+  debt_threshold: string | null;
+
+  profitability_risk: string;
+  profitability_ratio_used: string | null;
+  profitability_ratio_value: number | null;
+  profitability_threshold: string | null;
+
+  cashflow_risk: string;
+  cashflow_value: number | null;
+  cashflow_threshold: string | null;
+
+  overall_risk: string;
+
+  // Keys: "liquidity" | "debt" | "profitability" | "cashflow" | "overall".
+  verification_states: Record<string, VerificationState>;
+}
+
+export interface RisksResponse {
+  doc_id: string;
+  company_name: string | null;
+  risks: RiskItem[];
+}
+
 // --- Chat (ConversationTurn, ChatRequest, SourceItem, MetricUsed, ChatResponse) --
 
 export interface ConversationTurn {

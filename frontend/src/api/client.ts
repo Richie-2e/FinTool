@@ -13,6 +13,7 @@ import type {
   ExplainResponse,
   MetricsResponse,
   RatiosResponse,
+  RisksResponse,
   StatusResponse,
   UploadResponse,
 } from "./types";
@@ -87,6 +88,12 @@ export function getMetrics(docId: string): Promise<MetricsResponse> {
 
 export function getRatios(docId: string): Promise<RatiosResponse> {
   return request<RatiosResponse>(`/ratios/${docId}`);
+}
+
+// --- Risks -----------------------------------------------------------------
+
+export function getRisks(docId: string): Promise<RisksResponse> {
+  return request<RisksResponse>(`/risks/${docId}`);
 }
 
 // --- Chat ------------------------------------------------------------------

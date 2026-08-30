@@ -1,14 +1,16 @@
 import { useState } from "react";
 import { UploadForm } from "./components/UploadForm";
 import { StatusPoller } from "./components/StatusPoller";
+import { Dashboard } from "./components/Dashboard";
 import { MetricsTable } from "./components/MetricsTable";
 import { RatiosTable } from "./components/RatiosTable";
+import { RiskTable } from "./components/RiskTable";
 import { ChatPanel } from "./components/ChatPanel";
 import { ExplainPanel } from "./components/ExplainPanel";
 import type { StatusResponse } from "./api/types";
 
 type View = "upload" | "processing" | "results";
-type ResultsTab = "metrics" | "ratios" | "chat";
+type ResultsTab = "dashboard" | "metrics" | "ratios" | "risks" | "chat";
 
 interface ExplainTarget {
   metricName: string;
@@ -26,7 +28,7 @@ function App() {
   const [docId, setDocId] = useState<string | null>(null);
   const [pdfName, setPdfName] = useState<string | null>(null);
   const [companyName, setCompanyName] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<ResultsTab>("metrics");
+  const [activeTab, setActiveTab] = useState<ResultsTab>("dashboard");
   const [explainTarget, setExplainTarget] = useState<ExplainTarget | null>(null);
 
   function handleUploaded(newDocId: string, newPdfName: string) {
@@ -38,6 +40,7 @@ function App() {
   function handleReady(status: StatusResponse) {
     setCompanyName(status.company_name);
     setView("results");
+    setActiveTab("dashboard");
   }
 
   function handleReset() {
@@ -46,6 +49,7 @@ function App() {
     setPdfName(null);
     setCompanyName(null);
     setExplainTarget(null);
+    setActiveTab("dashboard");
   }
 
   return (
@@ -73,17 +77,30 @@ function App() {
           <div className="results-layout">
             <div className="results-main">
               <nav className="tabs">
+                <button className={activeTab === "dashboard" ? "active" : ""} onClick={() => setActiveTab("dashboard")}>
+                  Dashboard
+                </button>
                 <button className={activeTab === "metrics" ? "active" : ""} onClick={() => setActiveTab("metrics")}>
                   Metrics
                 </button>
                 <button className={activeTab === "ratios" ? "active" : ""} onClick={() => setActiveTab("ratios")}>
                   Ratios
                 </button>
+                <button className={activeTab === "risks" ? "active" : ""} onClick={() => setActiveTab("risks")}>
+                  Risk
+                </button>
                 <button className={activeTab === "chat" ? "active" : ""} onClick={() => setActiveTab("chat")}>
                   Chat
                 </button>
               </nav>
 
+              {activeTab === "dashboard" && (
+                <Dashboard
+                  docId={docId}
+                  onNavigate={(tab) => setActiveTab(tab)}
+                  onExplain={(metricName, year) => setExplainTarget({ metricName, year })}
+                />
+              )}
               {activeTab === "metrics" && <MetricsTable docId={docId} />}
               {activeTab === "ratios" && (
                 <RatiosTable
@@ -91,6 +108,7 @@ function App() {
                   onExplain={(metricName, year) => setExplainTarget({ metricName, year })}
                 />
               )}
+              {activeTab === "risks" && <RiskTable docId={docId} />}
               {activeTab === "chat" && <ChatPanel docId={docId} />}
             </div>
 
