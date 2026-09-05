@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-from backend.services.rag_service import build_grounded_prompt
+from google.genai import errors as genai_errors
+
+from backend.exceptions import APIError
+from backend.services.rag_service import build_grounded_prompt, call_llm
 
 
 def _resolved_row(metric_name, value, year, unit="INR million", page_no=1):
@@ -136,6 +140,153 @@ class TestResolvedMetricsSection(unittest.TestCase):
         prompt = build_grounded_prompt("q", [], computed, [], None)
         self.assertIn("Current Ratio (2025): 6.9040", prompt)
         self.assertIn("Liquidity Risk (2025): Low", prompt)
+
+
+def _client_error(code: int, message: str = "client error") -> genai_errors.ClientError:
+    return genai_errors.ClientError(code, {"error": {"code": code, "message": message, "status": "ERROR"}})
+
+
+def _server_error(code: int = 503, message: str = "high demand") -> genai_errors.ServerError:
+    return genai_errors.ServerError(code, {"error": {"code": code, "message": message, "status": "UNAVAILABLE"}})
+
+
+class TestCallLLMRetry(unittest.TestCase):
+    """
+    Unit tests for call_llm()'s bounded retry/backoff on transient Gemini
+    failures (503/5xx, 429) vs. immediate failure on permanent ones
+    (400/401/403/404). All Gemini calls are mocked -- none of these tests hit
+    the real API. time.sleep is mocked so tests don't actually wait.
+    """
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_immediate_success_makes_exactly_one_call(self, mock_client_cls, mock_sleep):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = SimpleNamespace(text="The answer.")
+        mock_client_cls.return_value = mock_client
+
+        result = call_llm("prompt")
+
+        self.assertEqual(result, "The answer.")
+        self.assertEqual(mock_client.models.generate_content.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_503_then_success_retries_and_returns_answer(self, mock_client_cls, mock_sleep):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = [
+            _server_error(503, "high demand"),
+            SimpleNamespace(text="Recovered answer."),
+        ]
+        mock_client_cls.return_value = mock_client
+
+        result = call_llm("prompt")
+
+        self.assertEqual(result, "Recovered answer.")
+        self.assertEqual(mock_client.models.generate_content.call_count, 2)
+        mock_sleep.assert_called_once()  # one wait, between attempt 1 and attempt 2
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_repeated_503_stops_at_max_attempts_no_infinite_loop(self, mock_client_cls, mock_sleep):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = [
+            _server_error(503), _server_error(503), _server_error(503),
+        ]
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(APIError) as ctx:
+            call_llm("prompt")
+
+        # Exactly 3 attempts (the configured max) -- not 4, not infinite.
+        self.assertEqual(mock_client.models.generate_content.call_count, 3)
+        # Waits happen only *between* attempts (1->2, 2->3), never after the
+        # final failed attempt.
+        self.assertEqual(mock_sleep.call_count, 2)
+        # The original transient Gemini failure must remain identifiable,
+        # and must be classified distinctly from a generic internal error.
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.error_code, "LLM_UNAVAILABLE")
+        self.assertIn("503", ctx.exception.detail)
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_401_is_not_retried(self, mock_client_cls, mock_sleep):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = [_client_error(401, "invalid key")]
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(RuntimeError) as ctx:
+            call_llm("prompt")
+
+        self.assertEqual(mock_client.models.generate_content.call_count, 1)
+        mock_sleep.assert_not_called()
+        self.assertIn("401", str(ctx.exception))
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_403_is_not_retried(self, mock_client_cls, mock_sleep):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = [_client_error(403, "forbidden")]
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(RuntimeError) as ctx:
+            call_llm("prompt")
+
+        self.assertEqual(mock_client.models.generate_content.call_count, 1)
+        mock_sleep.assert_not_called()
+        self.assertIn("403", str(ctx.exception))
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_404_is_not_retried(self, mock_client_cls, mock_sleep):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = [_client_error(404, "not found")]
+        mock_client_cls.return_value = mock_client
+
+        with self.assertRaises(RuntimeError) as ctx:
+            call_llm("prompt")
+
+        self.assertEqual(mock_client.models.generate_content.call_count, 1)
+        mock_sleep.assert_not_called()
+        self.assertIn("404", str(ctx.exception))
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_429_is_retried_per_policy(self, mock_client_cls, mock_sleep):
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = [
+            _client_error(429, "rate limited"),
+            SimpleNamespace(text="Recovered after rate limit."),
+        ]
+        mock_client_cls.return_value = mock_client
+
+        result = call_llm("prompt")
+
+        self.assertEqual(result, "Recovered after rate limit.")
+        self.assertEqual(mock_client.models.generate_content.call_count, 2)
+        mock_sleep.assert_called_once()
+
+    @patch("backend.services.rag_service.GEMINI_API_KEY", "")
+    @patch("backend.services.rag_service.time.sleep")
+    @patch("backend.services.rag_service.genai.Client")
+    def test_missing_api_key_still_raises_immediately_unchanged(self, mock_client_cls, mock_sleep):
+        # Non-regression: the pre-existing missing-key guard must still fire
+        # before any Gemini call is attempted, unaffected by the retry loop.
+        with self.assertRaises(RuntimeError) as ctx:
+            call_llm("prompt")
+
+        self.assertIn("GEMINI_API_KEY is not set", str(ctx.exception))
+        mock_client_cls.assert_not_called()
+        mock_sleep.assert_not_called()
 
 
 if __name__ == "__main__":

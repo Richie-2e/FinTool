@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -7,6 +9,7 @@ from google import genai
 from google.genai import errors as genai_errors
 
 from backend.config import EMBED_MODEL, GEMINI_API_KEY, LLM_MODEL
+from backend.exceptions import APIError
 from extraction.text_chunker import TextChunk, load_faiss_index, search_chunks
 
 # ---------------------------------------------------------------------------
@@ -248,11 +251,38 @@ def build_grounded_prompt(
 # call_llm
 # ---------------------------------------------------------------------------
 
+# Transient-failure retry policy. /chat is an interactive, user-facing call,
+# so this is deliberately small: 3 attempts total (1 original + 2 retries),
+# short exponential backoff with jitter, a few seconds of added latency at
+# most -- not a background-job retry policy.
+_MAX_ATTEMPTS      = 3
+_INITIAL_DELAY_S   = 1.0
+_BACKOFF_MULTIPLIER = 2.0
+_MAX_DELAY_S       = 4.0
+
+# 4xx codes that are transient/rate-limit in nature, not a rejected request --
+# safe to retry. All other 4xx (400/401/403/404/...) are permanent (bad key,
+# bad request, not found) and must never be retried.
+_RETRYABLE_CLIENT_CODES = {429}
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with jitter for the wait *before* the given attempt."""
+    base = min(_INITIAL_DELAY_S * (_BACKOFF_MULTIPLIER ** (attempt - 1)), _MAX_DELAY_S)
+    return base * random.uniform(0.5, 1.5)
+
+
 def call_llm(
     prompt: str,
     conversation_history: list[dict] | None = None,
 ) -> str:
-    """Call the Gemini API with the grounded prompt. Returns the response text."""
+    """Call the Gemini API with the grounded prompt. Returns the response text.
+
+    Retries transient failures (5xx server errors, 429 rate limiting) with
+    bounded exponential backoff -- Google's own guidance for handling
+    503 UNAVAILABLE. Permanent failures (400/401/403/404, bad/expired key,
+    malformed request) are raised immediately, never retried.
+    """
     if not GEMINI_API_KEY:
         raise RuntimeError(
             "GEMINI_API_KEY is not set. Add it to your .env file or environment."
@@ -270,16 +300,38 @@ def call_llm(
     ]
     contents.append({"role": "user", "parts": [{"text": prompt}]})
 
-    try:
-        response = client.models.generate_content(
-            model=LLM_MODEL,
-            contents=contents,
-        )
-    except genai_errors.ClientError as exc:
-        raise RuntimeError(
-            f"GEMINI_API_KEY is invalid or expired, or the request was rejected "
-            f"({exc.code}): {exc.message}"
-        )
-    except genai_errors.APIError as exc:
-        raise RuntimeError(f"Gemini API error ({exc.code}): {exc.message}")
-    return response.text
+    last_exc: genai_errors.APIError | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            response = client.models.generate_content(
+                model=LLM_MODEL,
+                contents=contents,
+            )
+            return response.text
+        except genai_errors.ClientError as exc:
+            if exc.code not in _RETRYABLE_CLIENT_CODES:
+                # Permanent: bad/expired key, malformed request, not found, etc.
+                raise RuntimeError(
+                    f"GEMINI_API_KEY is invalid or expired, or the request was rejected "
+                    f"({exc.code}): {exc.message}"
+                )
+            last_exc = exc
+        except genai_errors.APIError as exc:
+            # ServerError (5xx) -- transient by nature, always eligible to retry.
+            last_exc = exc
+
+        if attempt < _MAX_ATTEMPTS:
+            delay = _backoff_seconds(attempt)
+            print(
+                f"[rag] Gemini request failed with {last_exc.code}; "
+                f"retrying attempt {attempt + 1}/{_MAX_ATTEMPTS} in {delay:.1f}s"
+            )
+            time.sleep(delay)
+
+    print(f"[rag] Gemini request failed after {_MAX_ATTEMPTS} attempts (last error: {last_exc.code})")
+    raise APIError(
+        503,
+        f"The AI service (Gemini) is temporarily unavailable after {_MAX_ATTEMPTS} attempts "
+        f"(last error {last_exc.code}): {last_exc.message}",
+        "LLM_UNAVAILABLE",
+    )
