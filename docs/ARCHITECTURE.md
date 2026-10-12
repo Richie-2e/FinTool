@@ -28,8 +28,8 @@
                      ┌───────────────────────────────────────────┘
                      │
           ┌──────────┴───────────┐        ┌────────────────────┐
-          │ FAISS index +          │◀──────│ Gemini API          │
-          │ chunks.jsonl           │  RAG  │ (google-genai SDK)   │
+          │ FAISS index +          │◀──────│ OpenAI API          │
+          │ chunks.jsonl           │  RAG  │ (Responses API)     │
           │ (per doc_id)           │ retrieval + generation       │
           └────────────────────────┘       └────────────────────┘
                      ▲
@@ -123,7 +123,7 @@ FastAPI app (`backend/main.py`), 4 routers:
 |---|---|---|
 | `upload.py` | `POST /upload`, `GET /status/{doc_id}` | Validates + persists the PDF, triggers the pipeline, tracks `Document` row status |
 | `metrics.py` | `GET /metrics`, `GET /ratios`, `GET /risks` | Reads `resolved_metrics`/`computed_metrics` DB tables + `quality_report.json`; `ratios`/`risks` additionally call `backend/services/verification_service.py` to attach `verification_states` |
-| `chat.py` | `POST /chat` | `rag_service.py` (FAISS retrieval + Gemini call); also calls `verification_service.py` so the prompt can caveat `NEEDS_REVIEW` figures |
+| `chat.py` | `POST /chat` | `rag_service.py` (FAISS retrieval + OpenAI call); also calls `verification_service.py` so the prompt can caveat `NEEDS_REVIEW` figures |
 | `explain.py` | `GET /explain/{doc_id}/{metric}` | Reads `provenance.json` + `resolved_metrics` DB rows; calls `verification_service.py` for the ratio's own worst-case `verification_state` |
 
 `backend/services/verification_service.py` reads `resolved_metrics.verification_state` (set by
@@ -189,7 +189,7 @@ React + Vite + TypeScript, talks to the backend exclusively over HTTP through
        embeds the question, retrieves top-4 chunks
      rag_service.build_grounded_prompt(): assembles computed ratios (from DB) +
        retrieved chunk text + the question into one prompt
-     rag_service.call_llm(): sends the prompt to Gemini (gemini-flash-latest)
+     rag_service.call_llm(): sends the prompt to OpenAI (Responses API, default gpt-6-luna)
      chat.py post-processes: scans the answer for ratio-name mentions
        (metrics_used), flags missing key ratios (warning)
      ← 200 {answer, sources: [...], metrics_used: [...], warning}

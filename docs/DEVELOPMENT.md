@@ -10,7 +10,7 @@ what the system does and how it's built, see `docs/ARCHITECTURE.md`, `docs/API.m
 - **Node.js 20+** and npm (developed against Node 25.2.1 / npm 11.6.2; any reasonably
   current Node/npm should work)
 - **[Ollama](https://ollama.com/)**, running locally, serving the `qwen2.5:3b` model
-- **A Gemini API key** (for the chat endpoint — free tier is sufficient)
+- **An OpenAI API key** (`OPENAI_API_KEY`, for the chat endpoint)
 
 ## 2. Backend Environment Setup
 
@@ -28,7 +28,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and set at minimum your Gemini API key. The default `DATABASE_URL`
+Edit `.env` and set at minimum your `OPENAI_API_KEY`. The default `DATABASE_URL`
 (`sqlite:///./fintool.db`) and `SYNC_MODE` settings work out of the box for local
 development.
 

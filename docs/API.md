@@ -352,7 +352,7 @@ resolvable), not that risk is actually unknown/neutral.
 
 Grounded Q&A over the document: retrieves relevant RAG chunks (FAISS +
 sentence-transformers), assembles a prompt with computed metrics + retrieved
-text, and calls Gemini (`gemini-flash-latest` via `google-genai`).
+text, and calls OpenAI (`LLM_MODEL`, default `gpt-6-luna`, Responses API).
 
 **Request body:**
 ```json
@@ -403,7 +403,9 @@ Notes:
 - `404 DOC_NOT_FOUND`
 - `400 DOC_PROCESSING` / `400 DOC_FAILED`
 - `400 DOC_FAILED` — "RAG index not built for this document" (FAISS index missing)
-- `500 INTERNAL_ERROR` — Gemini API failure (invalid/expired key, quota exceeded, etc.) surfaces here with the underlying message in `detail`
+- `500 INTERNAL_ERROR` — permanent LLM failure (missing/invalid `OPENAI_API_KEY`, rejected request) surfaces here
+- `503 LLM_UNAVAILABLE` — transient LLM failure (429/5xx/network/timeout) persisted after the SDK's bounded retries
+- `502 LLM_EMPTY_RESPONSE` — the model returned an empty or incomplete answer
 
 ---
 

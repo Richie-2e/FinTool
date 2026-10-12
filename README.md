@@ -57,7 +57,7 @@ Full system design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 - **Backend**: FastAPI, SQLAlchemy/SQLite, Pydantic
 - **Extraction**: PyMuPDF, Qwen2.5 (via Ollama), a custom L2–L6 validation chain
-- **Chat**: Google Gemini, FAISS + sentence-transformers for retrieval
+- **Chat**: OpenAI (Responses API), FAISS + sentence-transformers for retrieval
 - **Frontend**: React, Vite, TypeScript — no framework dependencies beyond that
 
 ## Getting Started
