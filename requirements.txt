@@ -27,7 +27,8 @@ celery>=5.3.0
 redis>=5.0.0
 
 # LLM
-google-genai>=1.0.0
+openai>=2.0.0          # /chat generation (Responses API)
+google-genai>=1.0.0     # offline evaluation scripts only
 
 # Evaluation
 ragas>=0.1.0

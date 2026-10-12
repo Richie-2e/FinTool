@@ -16,9 +16,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from google.genai import errors as genai_errors
+import httpx
+import openai
 
 from backend.exceptions import APIError
+from backend.services import rag_service
 from backend.services.rag_service import build_grounded_prompt, call_llm
 
 
@@ -142,151 +144,178 @@ class TestResolvedMetricsSection(unittest.TestCase):
         self.assertIn("Liquidity Risk (2025): Low", prompt)
 
 
-def _client_error(code: int, message: str = "client error") -> genai_errors.ClientError:
-    return genai_errors.ClientError(code, {"error": {"code": code, "message": message, "status": "ERROR"}})
+def _status_error(cls, code: int, message: str = "error"):
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(code, request=request)
+    return cls(message, response=response, body=None)
 
 
-def _server_error(code: int = 503, message: str = "high demand") -> genai_errors.ServerError:
-    return genai_errors.ServerError(code, {"error": {"code": code, "message": message, "status": "UNAVAILABLE"}})
+def _ok(text="The answer.", status="completed"):
+    return SimpleNamespace(output_text=text, status=status)
 
 
-class TestCallLLMRetry(unittest.TestCase):
+_PATCH_KEY = patch("backend.services.rag_service.OPENAI_API_KEY", "test-key")
+_PATCH_CLIENT = "backend.services.rag_service.OpenAI"
+
+
+class TestCallLLM(unittest.TestCase):
     """
-    Unit tests for call_llm()'s bounded retry/backoff on transient Gemini
-    failures (503/5xx, 429) vs. immediate failure on permanent ones
-    (400/401/403/404). All Gemini calls are mocked -- none of these tests hit
-    the real API. time.sleep is mocked so tests don't actually wait.
+    Unit tests for call_llm() against the OpenAI Responses API. All OpenAI
+    calls are mocked -- none of these tests hit the real API. Retry/backoff
+    for transient failures is the SDK's job (max_retries on the client), so
+    these tests assert the client is configured with a bounded policy and
+    that call_llm() maps the SDK's *final* exceptions correctly, without a
+    second application-level retry loop.
     """
 
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_immediate_success_makes_exactly_one_call(self, mock_client_cls, mock_sleep):
+    def _run(self, mock_client_cls, result=None, error=None, history=None):
         mock_client = MagicMock()
-        mock_client.models.generate_content.return_value = SimpleNamespace(text="The answer.")
+        if error is not None:
+            mock_client.responses.create.side_effect = error
+        else:
+            mock_client.responses.create.return_value = result
         mock_client_cls.return_value = mock_client
+        with _PATCH_KEY:
+            return mock_client, call_llm("prompt", conversation_history=history)
 
-        result = call_llm("prompt")
-
+    @patch(_PATCH_CLIENT)
+    def test_success_returns_output_text_with_one_call(self, mock_client_cls):
+        mock_client, result = self._run(mock_client_cls, result=_ok("The answer."))
         self.assertEqual(result, "The answer.")
-        self.assertEqual(mock_client.models.generate_content.call_count, 1)
-        mock_sleep.assert_not_called()
+        self.assertEqual(mock_client.responses.create.call_count, 1)
 
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_503_then_success_retries_and_returns_answer(self, mock_client_cls, mock_sleep):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = [
-            _server_error(503, "high demand"),
-            SimpleNamespace(text="Recovered answer."),
+    @patch(_PATCH_CLIENT)
+    def test_client_has_bounded_timeout_and_retries(self, mock_client_cls):
+        self._run(mock_client_cls, result=_ok())
+        kwargs = mock_client_cls.call_args.kwargs
+        self.assertEqual(kwargs["api_key"], "test-key")
+        self.assertGreater(kwargs["timeout"], 0)
+        self.assertLessEqual(kwargs["timeout"], 120)
+        self.assertGreaterEqual(kwargs["max_retries"], 0)
+        self.assertLessEqual(kwargs["max_retries"], 3)
+
+    @patch(_PATCH_CLIENT)
+    def test_request_uses_configured_model_and_reasoning_none(self, mock_client_cls):
+        mock_client, _ = self._run(mock_client_cls, result=_ok())
+        kwargs = mock_client.responses.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], rag_service.LLM_MODEL)
+        self.assertFalse(kwargs["model"].lower().startswith("gemini"))
+        self.assertEqual(kwargs["reasoning"], {"effort": "none"})
+        self.assertGreater(kwargs["max_output_tokens"], 0)
+
+    @patch(_PATCH_CLIENT)
+    def test_history_mapped_to_turns_with_prompt_last(self, mock_client_cls):
+        history = [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
         ]
-        mock_client_cls.return_value = mock_client
+        mock_client, _ = self._run(mock_client_cls, result=_ok(), history=history)
+        self.assertEqual(
+            mock_client.responses.create.call_args.kwargs["input"],
+            [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "prompt"},
+            ],
+        )
 
-        result = call_llm("prompt")
+    @patch(_PATCH_CLIENT)
+    def test_no_history_sends_only_prompt(self, mock_client_cls):
+        mock_client, _ = self._run(mock_client_cls, result=_ok())
+        self.assertEqual(
+            mock_client.responses.create.call_args.kwargs["input"],
+            [{"role": "user", "content": "prompt"}],
+        )
 
-        self.assertEqual(result, "Recovered answer.")
-        self.assertEqual(mock_client.models.generate_content.call_count, 2)
-        mock_sleep.assert_called_once()  # one wait, between attempt 1 and attempt 2
-
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_repeated_503_stops_at_max_attempts_no_infinite_loop(self, mock_client_cls, mock_sleep):
+    @patch(_PATCH_CLIENT)
+    def test_exhausted_503_maps_to_llm_unavailable_without_extra_retry(self, mock_client_cls):
+        err = _status_error(openai.InternalServerError, 503, "overloaded")
         mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = [
-            _server_error(503), _server_error(503), _server_error(503),
-        ]
+        mock_client.responses.create.side_effect = err
         mock_client_cls.return_value = mock_client
-
-        with self.assertRaises(APIError) as ctx:
+        with _PATCH_KEY, self.assertRaises(APIError) as ctx:
             call_llm("prompt")
-
-        # Exactly 3 attempts (the configured max) -- not 4, not infinite.
-        self.assertEqual(mock_client.models.generate_content.call_count, 3)
-        # Waits happen only *between* attempts (1->2, 2->3), never after the
-        # final failed attempt.
-        self.assertEqual(mock_sleep.call_count, 2)
-        # The original transient Gemini failure must remain identifiable,
-        # and must be classified distinctly from a generic internal error.
+        # SDK owns retries; call_llm() itself calls create() exactly once.
+        self.assertEqual(mock_client.responses.create.call_count, 1)
         self.assertEqual(ctx.exception.status_code, 503)
         self.assertEqual(ctx.exception.error_code, "LLM_UNAVAILABLE")
         self.assertIn("503", ctx.exception.detail)
 
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_401_is_not_retried(self, mock_client_cls, mock_sleep):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = [_client_error(401, "invalid key")]
-        mock_client_cls.return_value = mock_client
+    @patch(_PATCH_CLIENT)
+    def test_exhausted_429_maps_to_llm_unavailable(self, mock_client_cls):
+        err = _status_error(openai.RateLimitError, 429, "rate limited")
+        with _PATCH_KEY, self.assertRaises(APIError) as ctx:
+            mock_client_cls.return_value = MagicMock(**{"responses.create.side_effect": err})
+            call_llm("prompt")
+        self.assertEqual(ctx.exception.error_code, "LLM_UNAVAILABLE")
 
+    @patch(_PATCH_CLIENT)
+    def test_timeout_and_connection_errors_map_to_llm_unavailable(self, mock_client_cls):
+        request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+        for err in (openai.APITimeoutError(request=request), openai.APIConnectionError(request=request)):
+            mock_client_cls.return_value = MagicMock(**{"responses.create.side_effect": err})
+            with _PATCH_KEY, self.assertRaises(APIError) as ctx:
+                call_llm("prompt")
+            self.assertEqual(ctx.exception.status_code, 503)
+            self.assertEqual(ctx.exception.error_code, "LLM_UNAVAILABLE")
+
+    @patch(_PATCH_CLIENT)
+    def test_auth_and_permission_errors_raise_runtimeerror_without_key_echo(self, mock_client_cls):
+        for cls, code in ((openai.AuthenticationError, 401), (openai.PermissionDeniedError, 403)):
+            err = _status_error(cls, code, "Incorrect API key provided: sk-SECRETFRAGMENT")
+            mock_client = MagicMock(**{"responses.create.side_effect": err})
+            mock_client_cls.return_value = mock_client
+            with _PATCH_KEY, self.assertRaises(RuntimeError) as ctx:
+                call_llm("prompt")
+            self.assertEqual(mock_client.responses.create.call_count, 1)
+            self.assertIn(str(code), str(ctx.exception))
+            self.assertNotIn("SECRETFRAGMENT", str(ctx.exception))
+            self.assertNotIsInstance(ctx.exception, APIError)
+
+    @patch(_PATCH_CLIENT)
+    def test_400_and_404_are_permanent_runtimeerrors(self, mock_client_cls):
+        for cls, code in ((openai.BadRequestError, 400), (openai.NotFoundError, 404)):
+            err = _status_error(cls, code, "bad request")
+            mock_client_cls.return_value = MagicMock(**{"responses.create.side_effect": err})
+            with _PATCH_KEY, self.assertRaises(RuntimeError) as ctx:
+                call_llm("prompt")
+            self.assertIn(str(code), str(ctx.exception))
+
+    @patch(_PATCH_CLIENT)
+    def test_empty_output_raises_instead_of_returning_empty_string(self, mock_client_cls):
+        for bad in (_ok(""), _ok("   \n"), _ok(None)):
+            mock_client_cls.return_value = MagicMock(**{"responses.create.return_value": bad})
+            with _PATCH_KEY, self.assertRaises(APIError) as ctx:
+                call_llm("prompt")
+            self.assertEqual(ctx.exception.error_code, "LLM_EMPTY_RESPONSE")
+
+    @patch(_PATCH_CLIENT)
+    def test_incomplete_response_raises_even_with_partial_text(self, mock_client_cls):
+        mock_client_cls.return_value = MagicMock(
+            **{"responses.create.return_value": _ok("Partial ans", status="incomplete")}
+        )
+        with _PATCH_KEY, self.assertRaises(APIError) as ctx:
+            call_llm("prompt")
+        self.assertEqual(ctx.exception.error_code, "LLM_EMPTY_RESPONSE")
+
+    @patch("backend.services.rag_service.OPENAI_API_KEY", "")
+    @patch(_PATCH_CLIENT)
+    def test_missing_api_key_raises_before_any_call(self, mock_client_cls):
         with self.assertRaises(RuntimeError) as ctx:
             call_llm("prompt")
-
-        self.assertEqual(mock_client.models.generate_content.call_count, 1)
-        mock_sleep.assert_not_called()
-        self.assertIn("401", str(ctx.exception))
-
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_403_is_not_retried(self, mock_client_cls, mock_sleep):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = [_client_error(403, "forbidden")]
-        mock_client_cls.return_value = mock_client
-
-        with self.assertRaises(RuntimeError) as ctx:
-            call_llm("prompt")
-
-        self.assertEqual(mock_client.models.generate_content.call_count, 1)
-        mock_sleep.assert_not_called()
-        self.assertIn("403", str(ctx.exception))
-
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_404_is_not_retried(self, mock_client_cls, mock_sleep):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = [_client_error(404, "not found")]
-        mock_client_cls.return_value = mock_client
-
-        with self.assertRaises(RuntimeError) as ctx:
-            call_llm("prompt")
-
-        self.assertEqual(mock_client.models.generate_content.call_count, 1)
-        mock_sleep.assert_not_called()
-        self.assertIn("404", str(ctx.exception))
-
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "test-key")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_429_is_retried_per_policy(self, mock_client_cls, mock_sleep):
-        mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = [
-            _client_error(429, "rate limited"),
-            SimpleNamespace(text="Recovered after rate limit."),
-        ]
-        mock_client_cls.return_value = mock_client
-
-        result = call_llm("prompt")
-
-        self.assertEqual(result, "Recovered after rate limit.")
-        self.assertEqual(mock_client.models.generate_content.call_count, 2)
-        mock_sleep.assert_called_once()
-
-    @patch("backend.services.rag_service.GEMINI_API_KEY", "")
-    @patch("backend.services.rag_service.time.sleep")
-    @patch("backend.services.rag_service.genai.Client")
-    def test_missing_api_key_still_raises_immediately_unchanged(self, mock_client_cls, mock_sleep):
-        # Non-regression: the pre-existing missing-key guard must still fire
-        # before any Gemini call is attempted, unaffected by the retry loop.
-        with self.assertRaises(RuntimeError) as ctx:
-            call_llm("prompt")
-
-        self.assertIn("GEMINI_API_KEY is not set", str(ctx.exception))
+        self.assertEqual(str(ctx.exception), "OPENAI_API_KEY is not configured.")
         mock_client_cls.assert_not_called()
-        mock_sleep.assert_not_called()
+
+
+class TestLLMModelConfig(unittest.TestCase):
+    def test_gemini_model_name_never_reaches_openai(self):
+        from backend import config
+        with patch.dict("os.environ", {"LLM_MODEL": "gemini-flash-latest"}):
+            self.assertEqual(config._resolve_llm_model(), "gpt-6-luna")
+        with patch.dict("os.environ", {"LLM_MODEL": ""}):
+            self.assertEqual(config._resolve_llm_model(), "gpt-6-luna")
+        with patch.dict("os.environ", {"LLM_MODEL": "gpt-x"}):
+            self.assertEqual(config._resolve_llm_model(), "gpt-x")
 
 
 if __name__ == "__main__":

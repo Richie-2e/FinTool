@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import random
-import time
 from pathlib import Path
 from typing import Optional
 
-from google import genai
-from google.genai import errors as genai_errors
+import openai
+from openai import OpenAI
 
-from backend.config import EMBED_MODEL, GEMINI_API_KEY, LLM_MODEL
+from backend.config import EMBED_MODEL, LLM_MODEL, OPENAI_API_KEY
 from backend.exceptions import APIError
 from extraction.text_chunker import TextChunk, load_faiss_index, search_chunks
 
@@ -251,87 +249,89 @@ def build_grounded_prompt(
 # call_llm
 # ---------------------------------------------------------------------------
 
-# Transient-failure retry policy. /chat is an interactive, user-facing call,
-# so this is deliberately small: 3 attempts total (1 original + 2 retries),
-# short exponential backoff with jitter, a few seconds of added latency at
-# most -- not a background-job retry policy.
-_MAX_ATTEMPTS      = 3
-_INITIAL_DELAY_S   = 1.0
-_BACKOFF_MULTIPLIER = 2.0
-_MAX_DELAY_S       = 4.0
-
-# 4xx codes that are transient/rate-limit in nature, not a rejected request --
-# safe to retry. All other 4xx (400/401/403/404/...) are permanent (bad key,
-# bad request, not found) and must never be retried.
-_RETRYABLE_CLIENT_CODES = {429}
-
-
-def _backoff_seconds(attempt: int) -> float:
-    """Exponential backoff with jitter for the wait *before* the given attempt."""
-    base = min(_INITIAL_DELAY_S * (_BACKOFF_MULTIPLIER ** (attempt - 1)), _MAX_DELAY_S)
-    return base * random.uniform(0.5, 1.5)
+# Single, bounded retry layer: the OpenAI SDK's own retry (429 / 5xx /
+# connection errors / timeouts, with its built-in backoff). There is no
+# application-level retry loop on top, so worst case is
+# (1 + _MAX_RETRIES) attempts of at most _REQUEST_TIMEOUT_S each.
+_REQUEST_TIMEOUT_S = 60.0
+_MAX_RETRIES       = 2
+_REASONING_EFFORT  = "none"
+_MAX_OUTPUT_TOKENS = 1500
 
 
 def call_llm(
     prompt: str,
     conversation_history: list[dict] | None = None,
 ) -> str:
-    """Call the Gemini API with the grounded prompt. Returns the response text.
+    """Call the OpenAI Responses API with the grounded prompt. Returns the response text.
 
-    Retries transient failures (5xx server errors, 429 rate limiting) with
-    bounded exponential backoff -- Google's own guidance for handling
-    503 UNAVAILABLE. Permanent failures (400/401/403/404, bad/expired key,
-    malformed request) are raised immediately, never retried.
+    Transient failures (429, 5xx, network, timeout) are retried by the SDK
+    within its bounded policy; if they persist, APIError(503, LLM_UNAVAILABLE)
+    is raised. Permanent failures (bad/missing key, rejected request) raise
+    RuntimeError immediately and are never retried. An empty or incomplete
+    response raises APIError(502, LLM_EMPTY_RESPONSE) rather than returning "".
     """
-    if not GEMINI_API_KEY:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not set. Add it to your .env file or environment."
-        )
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+    client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        timeout=_REQUEST_TIMEOUT_S,
+        max_retries=_MAX_RETRIES,
+    )
 
-    # Anthropic-style {"role": "user"/"assistant", "content": ...} turns,
-    # translated to Gemini's {"role": "user"/"model", "parts": [{"text": ...}]}.
-    contents: list[dict] = [
+    # {"role": "user"/"assistant", "content": ...} turns pass straight
+    # through; the current grounded prompt is always the final user message.
+    messages: list[dict] = [
         {
-            "role": "model" if turn["role"] == "assistant" else "user",
-            "parts": [{"text": turn["content"]}],
+            "role": "assistant" if turn["role"] == "assistant" else "user",
+            "content": turn["content"],
         }
         for turn in (conversation_history or [])
     ]
-    contents.append({"role": "user", "parts": [{"text": prompt}]})
+    messages.append({"role": "user", "content": prompt})
 
-    last_exc: genai_errors.APIError | None = None
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            response = client.models.generate_content(
-                model=LLM_MODEL,
-                contents=contents,
+    try:
+        response = client.responses.create(
+            model=LLM_MODEL,
+            input=messages,
+            reasoning={"effort": _REASONING_EFFORT},
+            max_output_tokens=_MAX_OUTPUT_TOKENS,
+        )
+    except (openai.AuthenticationError, openai.PermissionDeniedError) as exc:
+        # Deliberately no exc.message: auth errors can echo a key fragment.
+        raise RuntimeError(
+            f"The LLM provider rejected the credentials ({exc.status_code}). "
+            f"Check OPENAI_API_KEY."
+        )
+    except openai.APIStatusError as exc:
+        if exc.status_code == 429 or exc.status_code >= 500:
+            # Transient, and the SDK's retries are already exhausted.
+            print(f"[rag] LLM request failed after retries (status {exc.status_code})")
+            raise APIError(
+                503,
+                f"The AI service is temporarily unavailable "
+                f"(last error {exc.status_code}). Please try again.",
+                "LLM_UNAVAILABLE",
             )
-            return response.text
-        except genai_errors.ClientError as exc:
-            if exc.code not in _RETRYABLE_CLIENT_CODES:
-                # Permanent: bad/expired key, malformed request, not found, etc.
-                raise RuntimeError(
-                    f"GEMINI_API_KEY is invalid or expired, or the request was rejected "
-                    f"({exc.code}): {exc.message}"
-                )
-            last_exc = exc
-        except genai_errors.APIError as exc:
-            # ServerError (5xx) -- transient by nature, always eligible to retry.
-            last_exc = exc
+        # Permanent: malformed request, unknown model, etc.
+        raise RuntimeError(
+            f"The LLM request was rejected ({exc.status_code}): {str(exc.message)[:200]}"
+        )
+    except openai.APIConnectionError as exc:
+        # Includes APITimeoutError.
+        print(f"[rag] LLM request failed after retries ({type(exc).__name__})")
+        raise APIError(
+            503,
+            f"The AI service is temporarily unavailable ({type(exc).__name__}). "
+            f"Please try again.",
+            "LLM_UNAVAILABLE",
+        )
 
-        if attempt < _MAX_ATTEMPTS:
-            delay = _backoff_seconds(attempt)
-            print(
-                f"[rag] Gemini request failed with {last_exc.code}; "
-                f"retrying attempt {attempt + 1}/{_MAX_ATTEMPTS} in {delay:.1f}s"
-            )
-            time.sleep(delay)
-
-    print(f"[rag] Gemini request failed after {_MAX_ATTEMPTS} attempts (last error: {last_exc.code})")
-    raise APIError(
-        503,
-        f"The AI service (Gemini) is temporarily unavailable after {_MAX_ATTEMPTS} attempts "
-        f"(last error {last_exc.code}): {last_exc.message}",
-        "LLM_UNAVAILABLE",
-    )
+    text = (getattr(response, "output_text", None) or "").strip()
+    if getattr(response, "status", None) == "incomplete" or not text:
+        raise APIError(
+            502,
+            "The AI service returned an empty or incomplete answer. Please try again.",
+            "LLM_EMPTY_RESPONSE",
+        )
+    return text
