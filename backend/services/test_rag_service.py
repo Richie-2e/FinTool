@@ -117,7 +117,7 @@ class TestResolvedMetricsSection(unittest.TestCase):
     def test_null_page_no_omits_page_suffix(self):
         rows = [_resolved_row("revenue", 100.0, 2025, unit="INR million", page_no=None)]
         prompt = build_grounded_prompt("q", [], [], rows, None)
-        self.assertIn("Revenue (2025): 100.00 INR million\n", prompt)
+        self.assertIn("Revenue (2025): 100.00 INR million [scope not verified]\n", prompt)
         self.assertNotIn("(page None)", prompt)
 
     def test_row_with_null_value_is_skipped(self):
@@ -142,6 +142,189 @@ class TestResolvedMetricsSection(unittest.TestCase):
         prompt = build_grounded_prompt("q", [], computed, [], None)
         self.assertIn("Current Ratio (2025): 6.9040", prompt)
         self.assertIn("Liquidity Risk (2025): Low", prompt)
+
+
+def _chunk(text, page_no=1):
+    return SimpleNamespace(text=text, page_no=page_no)
+
+
+def _docs_section(prompt):
+    return prompt.split("RETRIEVED DOCUMENT SECTIONS:\n", 1)[1].split("\n\nUSER QUESTION:", 1)[0]
+
+
+class TestRetrievedChunkVisibility(unittest.TestCase):
+    """R1: the full stored chunk text reaches the prompt (no 500-char cut)."""
+
+    def test_text_beyond_char_500_reaches_prompt(self):
+        text = "A" * 600 + " ANSWER-BEARING-FACT 46,889 million " + "B" * 100
+        prompt = build_grounded_prompt("q", [_chunk(text, 45)], [], [], None)
+        self.assertIn("ANSWER-BEARING-FACT 46,889 million", prompt)
+
+    def test_complete_800_char_chunk_is_included_verbatim(self):
+        text = ("0123456789" * 80)  # 800 chars, the chunker's CHUNK_SIZE
+        prompt = build_grounded_prompt("q", [_chunk(text, 3)], [], [], None)
+        self.assertEqual(_docs_section(prompt), f'  [Page 3] "{text}"')
+
+    def test_newlines_still_flattened_and_whitespace_stripped(self):
+        prompt = build_grounded_prompt("q", [_chunk("\n line one\nline two\n" + "x" * 600 + "\n", 2)], [], [], None)
+        section = _docs_section(prompt)
+        self.assertNotIn("\n", section)
+        self.assertTrue(section.startswith('  [Page 2] "line one line two x'))
+        self.assertTrue(section.endswith('x"'))
+
+    def test_order_and_page_labels_preserved(self):
+        chunks = [_chunk("first " + "a" * 700, 45), _chunk("second", 12), _chunk("third " + "c" * 650, 45), _chunk("fourth", 3)]
+        lines = _docs_section(build_grounded_prompt("q", chunks, [], [], None)).split("\n")
+        self.assertEqual([l.split("]")[0] for l in lines], ["  [Page 45", "  [Page 12", "  [Page 45", "  [Page 3"])
+        self.assertEqual([l.split('"')[1].split()[0] for l in lines], ["first", "second", "third", "fourth"])
+
+    def test_short_chunk_unchanged(self):
+        self.assertEqual(_docs_section(build_grounded_prompt("q", [_chunk("short text", 7)], [], [], None)),
+                         '  [Page 7] "short text"')
+
+    def test_empty_and_whitespace_chunks_do_not_crash(self):
+        section = _docs_section(build_grounded_prompt("q", [_chunk("", 1), _chunk("  \n ", 2)], [], [], None))
+        self.assertEqual(section, '  [Page 1] ""\n  [Page 2] ""')
+
+    def test_no_chunks_fallback_text_unchanged(self):
+        self.assertEqual(_docs_section(build_grounded_prompt("q", [], [], [], None)),
+                         "  No relevant document sections retrieved.")
+
+    def test_only_documents_section_depends_on_chunk_length(self):
+        short = build_grounded_prompt("Q?", [_chunk("x" * 100)], [_computed_row(2025, current_ratio=1.5)],
+                                      [_resolved_row("revenue", 100.0, 2025)], None)
+        long_ = build_grounded_prompt("Q?", [_chunk("x" * 800)], [_computed_row(2025, current_ratio=1.5)],
+                                      [_resolved_row("revenue", 100.0, 2025)], None)
+        def outside(p):
+            head, rest = p.split("RETRIEVED DOCUMENT SECTIONS:\n", 1)
+            return head, rest.split("\n\nUSER QUESTION:", 1)[1]
+        self.assertEqual(outside(short), outside(long_))
+
+    def test_sources_snippet_format_unchanged(self):
+        # build_rag_context's UI snippet stays 200 chars (R1 does not touch the source response format).
+        import inspect
+        self.assertIn("c.text[:200]", inspect.getsource(rag_service.build_rag_context))
+        self.assertIn("k=4", inspect.getsource(rag_service.build_rag_context))
+
+
+
+def _r(metric, value, year, unit="INR crore", page_no=1, section_type=None, **extra):
+    return SimpleNamespace(metric_name=metric, value=value, year=year, unit=unit, page_no=page_no,
+                           section_type=section_type, **extra)
+
+
+def _lines(prompt, startswith):
+    return [l.strip() for l in prompt.split("\n") if l.strip().startswith(startswith)]
+
+
+class TestR2StructuredMetadata(unittest.TestCase):
+    """R2: explicit scope / fiscal-year note / supported units in the structured block."""
+
+    # ---- scope -----------------------------------------------------------
+    def test_consolidated_and_standalone_tags(self):
+        rows = [_r("revenue", 100.0, 2025, section_type="consolidated", page_no=62),
+                _r("total_assets", 50.0, 2025, section_type="standalone", page_no=83)]
+        p = build_grounded_prompt("q", [], [], rows, None)
+        self.assertIn("Revenue (2025): 100.00 INR crore (page 62) [consolidated]", p)
+        self.assertIn("Total Assets (2025): 50.00 INR crore (page 83) [standalone]", p)
+
+    def test_unknown_missing_or_odd_scope_is_not_verified(self):
+        for st in ("unknown", None, "", "  ", "group", "Mixed"):
+            p = build_grounded_prompt("q", [], [], [_r("revenue", 1.0, 2025, section_type=st)], None)
+            self.assertIn("[scope not verified]", p, st)
+            self.assertNotIn("[consolidated]", p.split("RESOLVED METRICS")[1])
+
+    def test_scope_tag_is_case_insensitive_and_fixture_without_attribute_is_unverified(self):
+        p = build_grounded_prompt("q", [], [], [_r("revenue", 1.0, 2025, section_type="Consolidated")], None)
+        self.assertIn("(page 1) [consolidated]", p)
+        legacy = SimpleNamespace(metric_name="revenue", value=2.0, year=2025, unit="INR crore", page_no=3)   # no section_type attr
+        self.assertIn("Revenue (2025): 2.00 INR crore (page 3) [scope not verified]",
+                      build_grounded_prompt("q", [], [], [legacy], None))
+
+    def test_scope_precedes_needs_review_and_follows_page(self):
+        row = _r("revenue", 5.0, 2025, section_type="standalone", page_no=9,
+                 verification_state="NEEDS_REVIEW", verification_reason="why")
+        self.assertIn("Revenue (2025): 5.00 INR crore (page 9) [standalone] [NEEDS_REVIEW: why]",
+                      build_grounded_prompt("q", [], [], [row], None))
+
+    def test_different_fiscal_years_keep_their_own_scope_and_label(self):
+        rows = [_r("revenue", 10.0, 2024, section_type="consolidated"), _r("revenue", 12.0, 2025, section_type="standalone")]
+        p = build_grounded_prompt("q", [], [], rows, None)
+        self.assertIn("Revenue (2024): 10.00 INR crore (page 1) [consolidated]", p)
+        self.assertIn("Revenue (2025): 12.00 INR crore (page 1) [standalone]", p)
+
+    # ---- units of computed monetary metrics -------------------------------
+    def _fcf_prompt(self, resolved, **vals):
+        return build_grounded_prompt("q", [], [_computed_row(2025, **vals)], resolved, None)
+
+    def test_no_hardcoded_crore_label(self):
+        p = self._fcf_prompt([_r("operating_cash_flow", 100.0, 2025)], free_cash_flow=100.0, total_debt=5.0)
+        self.assertNotIn("(Cr)", p)
+
+    def test_free_cash_flow_unit_from_inputs_crore_lakh_million(self):
+        for unit in ("INR crore", "INR lakhs", "INR million"):
+            p = self._fcf_prompt([_r("operating_cash_flow", 1000.0, 2025, unit=unit)], free_cash_flow=1000.0)
+            self.assertIn(f"Free Cash Flow (2025): 1000.0000 {unit}", p)
+
+    def test_inputs_agree_after_plural_normalisation(self):
+        rows = [_r("operating_cash_flow", 10.0, 2025, unit="INR lakh"), _r("capex", -3.0, 2025, unit="INR lakhs")]
+        self.assertIn("Free Cash Flow (2025): 7.0000 INR lakh\n", self._fcf_prompt(rows, free_cash_flow=7.0))
+
+    def test_total_debt_unit_from_long_and_short_term_debt(self):
+        rows = [_r("long_term_debt", 5.0, 2025, unit="INR million"), _r("short_term_debt", 2.0, 2025, unit="INR million")]
+        self.assertIn("Total Debt (2025): 7.0000 INR million", self._fcf_prompt(rows, total_debt=7.0))
+
+    def test_conflicting_input_units_are_not_guessed(self):
+        rows = [_r("operating_cash_flow", 10.0, 2025, unit="INR crore"), _r("capex", -3.0, 2025, unit="INR lakh")]
+        self.assertIn("Free Cash Flow (2025): 7.0000 [unit not recorded]", self._fcf_prompt(rows, free_cash_flow=7.0))
+
+    def test_missing_input_row_or_blank_unit_is_not_recorded(self):
+        self.assertIn("Free Cash Flow (2025): 7.0000 [unit not recorded]", self._fcf_prompt([], free_cash_flow=7.0))
+        rows = [_r("operating_cash_flow", 10.0, 2025, unit=None)]
+        self.assertIn("Free Cash Flow (2025): 7.0000 [unit not recorded]", self._fcf_prompt(rows, free_cash_flow=7.0))
+        rows = [_r("long_term_debt", 5.0, 2025, unit="INR crore"), _r("short_term_debt", 2.0, 2025, unit="  ")]
+        self.assertIn("Total Debt (2025): 7.0000 [unit not recorded]", self._fcf_prompt(rows, total_debt=7.0))
+
+    def test_unit_is_taken_from_the_same_year_only(self):
+        rows = [_r("operating_cash_flow", 10.0, 2024, unit="INR crore")]
+        self.assertIn("Free Cash Flow (2025): 7.0000 [unit not recorded]", self._fcf_prompt(rows, free_cash_flow=7.0))
+
+    def test_needs_review_tag_stays_last_on_computed_line(self):
+        rows = [_r("operating_cash_flow", 10.0, 2025, unit="INR crore")]
+        p = build_grounded_prompt("q", [], [_computed_row(2025, free_cash_flow=10.0)], rows, None,
+                                  ratio_verification_states={("free_cash_flow", 2025): "NEEDS_REVIEW"})
+        self.assertIn("Free Cash Flow (2025): 10.0000 INR crore [NEEDS_REVIEW]", p)
+
+    def test_ratios_and_risk_labels_gain_no_unit_or_scope(self):
+        p = build_grounded_prompt("q", [], [_computed_row(2025, current_ratio=1.5, liquidity_risk="Low")], [], None)
+        self.assertIn("  Current Ratio (2025): 1.5000\n", p)
+        self.assertIn("  Liquidity Risk (2025): Low\n", p)
+
+    # ---- notes block ---------------------------------------------------------
+    def test_notes_present_only_when_structured_data_present(self):
+        with_rows = build_grounded_prompt("q", [], [], [_r("revenue", 1.0, 2025)], None)
+        with_ratio = build_grounded_prompt("q", [], [_computed_row(2025, current_ratio=1.5)], [], None)
+        empty = build_grounded_prompt("q", [], [], [], None)
+        for p in (with_rows, with_ratio):
+            self.assertIn("NOTES ON STRUCTURED METRICS:", p)
+            self.assertIn("fiscal year ending in that calendar year", p)
+            self.assertIn("[scope not verified] means the basis was not established", p)
+        self.assertNotIn("NOTES ON STRUCTURED METRICS", empty)
+
+    def test_notes_precede_resolved_section_and_do_not_touch_other_sections(self):
+        p = build_grounded_prompt("Q?", [_chunk("doc text", 4)], [], [_r("revenue", 1.0, 2025)], None)
+        self.assertLess(p.index("NOTES ON STRUCTURED METRICS"), p.index("RESOLVED METRICS"))
+        self.assertIn('RETRIEVED DOCUMENT SECTIONS:\n  [Page 4] "doc text"\n\nUSER QUESTION: Q?', p)
+        self.assertIn("COMPUTED METRICS (authoritative — do not contradict these):", p)
+        self.assertIn("RESOLVED METRICS (extracted directly from the financial statements — authoritative):", p)
+        self.assertIn("- Answer in 3-5 sentences.", p)
+        self.assertIn("- If the answer cannot be found in the sources above, say", p)
+
+    def test_r1_full_chunk_behaviour_preserved_with_r2(self):
+        text = "A" * 600 + " FACT-AFTER-500"
+        p = build_grounded_prompt("q", [_chunk(text, 7)], [], [_r("revenue", 1.0, 2025, section_type="consolidated")], None)
+        self.assertIn("FACT-AFTER-500", p)
+
 
 
 def _status_error(cls, code: int, message: str = "error"):

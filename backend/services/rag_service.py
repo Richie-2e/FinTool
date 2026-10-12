@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -64,10 +65,10 @@ _RATIO_LABELS: list[tuple[str, str]] = [
     ("gross_margin",       "Gross Margin"),
     ("asset_turnover",     "Asset Turnover"),
     ("ocf_to_revenue",     "OCF-to-Revenue"),
-    ("free_cash_flow",     "Free Cash Flow (Cr)"),
+    ("free_cash_flow",     "Free Cash Flow"),
     ("yoy_revenue_growth", "YoY Revenue Growth"),
     ("yoy_profit_growth",  "YoY Profit Growth"),
-    ("total_debt",         "Total Debt (Cr)"),
+    ("total_debt",         "Total Debt"),
 ]
 
 _RISK_LABELS: list[tuple[str, str]] = [
@@ -115,6 +116,52 @@ _RAW_METRIC_LABELS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+# R2: structured-metric metadata. Scope comes from ResolvedMetric.section_type
+# (page-header classifier, else the extractor's own guess; "unknown"/absent =
+# not established). Computed monetary values (free_cash_flow, total_debt) have
+# no stored unit: it is taken from the resolved input rows of the SAME year, and
+# only when those agree; otherwise it is stated as not recorded -- never assumed.
+_SCOPE_TAGS = {"consolidated": "[consolidated]", "standalone": "[standalone]"}
+_SCOPE_UNVERIFIED = "[scope not verified]"
+_UNIT_NOT_RECORDED = "[unit not recorded]"
+_COMPUTED_MONETARY_INPUTS: dict[str, tuple[str, ...]] = {
+    "free_cash_flow": ("operating_cash_flow", "capex"),
+    "total_debt":     ("long_term_debt", "short_term_debt"),
+}
+
+
+def _scope_tag(section_type: Optional[str]) -> str:
+    return _SCOPE_TAGS.get((section_type or "").strip().lower(), _SCOPE_UNVERIFIED)
+
+
+def _normalise_unit(unit: str) -> str:
+    return re.sub(r"s$", "", unit.strip().lower())    # "INR lakhs" == "INR lakh"
+
+
+def _computed_unit_suffix(attr: str, year: int, by_metric_year: dict) -> str:
+    units: dict[str, str] = {}
+    for metric in _COMPUTED_MONETARY_INPUTS[attr]:
+        rec = by_metric_year.get(metric, {}).get(year)
+        if rec is None:
+            continue
+        unit = rec[1]
+        if not unit or not unit.strip():
+            return f" {_UNIT_NOT_RECORDED}"
+        units.setdefault(_normalise_unit(unit), unit.strip())
+    return f" {next(iter(units.values()))}" if len(units) == 1 else f" {_UNIT_NOT_RECORDED}"
+
+
+_STRUCTURED_NOTES = (
+    "NOTES ON STRUCTURED METRICS:\n"
+    "- A year in parentheses is the fiscal year ending in that calendar year "
+    "(e.g. 2025 = FY2024-25 for a 31 March year-end).\n"
+    "- [consolidated] / [standalone] is the reporting basis recorded when the figure was extracted; "
+    "[scope not verified] means the basis was not established.\n"
+    "- Computed ratios and risk labels carry no scope tag.\n"
+    "\n"
+)
+
+
 def build_grounded_prompt(
     question: str,
     chunks: list[TextChunk],
@@ -141,7 +188,7 @@ def build_grounded_prompt(
     # fixtures (e.g. test_rag_service.py's SimpleNamespace rows) that predate
     # Phase A/B's verification_state/verification_reason columns -- absent
     # is treated identically to "not checked" (no caveat appended), not an error.
-    by_metric_year: dict[str, dict[int, tuple[float, Optional[str], Optional[int], Optional[str], Optional[str]]]] = {}
+    by_metric_year: dict[str, dict[int, tuple[float, Optional[str], Optional[int], Optional[str], Optional[str], Optional[str]]]] = {}
     for row in resolved_metrics_rows:
         if row.year is None or row.value is None:
             continue
@@ -149,6 +196,7 @@ def build_grounded_prompt(
             row.value, row.unit, row.page_no,
             getattr(row, "verification_state", None),
             getattr(row, "verification_reason", None),
+            getattr(row, "section_type", None),
         )
 
     raw_lines: list[str] = []
@@ -157,9 +205,10 @@ def build_grounded_prompt(
         for attr, label in group_metrics:
             years = by_metric_year.get(attr, {})
             for yr in sorted(years):
-                value, unit, page_no, verification_state, verification_reason = years[yr]
+                value, unit, page_no, verification_state, verification_reason, section_type = years[yr]
                 unit_suffix = f" {unit}" if unit else ""
                 page_suffix = f" (page {page_no})" if page_no is not None else ""
+                scope_suffix = f" {_scope_tag(section_type)}"
                 # Caveat only NEEDS_REVIEW figures -- VERIFIED and "not
                 # checked" (None, e.g. V1-fallback-sourced metrics) render
                 # exactly as before Phase B/C, so every existing
@@ -169,7 +218,7 @@ def build_grounded_prompt(
                     if verification_state == "NEEDS_REVIEW" else ""
                 )
                 group_lines.append(
-                    f"  {label} ({yr}): {value:,.2f}{unit_suffix}{page_suffix}{review_suffix}"
+                    f"  {label} ({yr}): {value:,.2f}{unit_suffix}{page_suffix}{scope_suffix}{review_suffix}"
                 )
         if group_lines:
             raw_lines.append(f"{group_label}:")
@@ -190,7 +239,11 @@ def build_grounded_prompt(
             if val is not None:
                 state = (ratio_verification_states or {}).get((attr, yr))
                 review_suffix = " [NEEDS_REVIEW]" if state == "NEEDS_REVIEW" else ""
-                metric_lines.append(f"  {label} ({yr}): {val:.4f}{review_suffix}")
+                unit_suffix = (
+                    _computed_unit_suffix(attr, yr, by_metric_year)
+                    if attr in _COMPUTED_MONETARY_INPUTS else ""
+                )
+                metric_lines.append(f"  {label} ({yr}): {val:.4f}{unit_suffix}{review_suffix}")
         for attr, label in _RISK_LABELS:
             val = getattr(row, attr, None)
             if val:
@@ -205,8 +258,8 @@ def build_grounded_prompt(
     # ── RETRIEVED DOCUMENT SECTIONS ──────────────────────────────────────────
     doc_lines: list[str] = []
     for chunk in chunks:
-        # Trim chunk text to keep the prompt compact
-        excerpt = chunk.text.replace("\n", " ").strip()[:500]
+        # Full stored chunk text (<= CHUNK_SIZE chars); newlines flattened as before.
+        excerpt = chunk.text.replace("\n", " ").strip()
         doc_lines.append(f'  [Page {chunk.page_no}] "{excerpt}"')
 
     docs_section = (
@@ -216,10 +269,12 @@ def build_grounded_prompt(
     )
 
     # ── Assemble ─────────────────────────────────────────────────────────────
+    structured_notes = _STRUCTURED_NOTES if (raw_lines or metric_lines) else ""
     return (
         "You are a financial analyst assistant. You must only use the information provided below.\n"
         "Do not use any outside knowledge. Do not invent numbers.\n"
         "\n"
+        f"{structured_notes}"
         "RESOLVED METRICS (extracted directly from the financial statements — authoritative):\n"
         f"{resolved_section}\n"
         "\n"
