@@ -7,6 +7,7 @@ import { RatiosTable } from "./components/RatiosTable";
 import { RiskTable } from "./components/RiskTable";
 import { ChatPanel } from "./components/ChatPanel";
 import { ExplainPanel } from "./components/ExplainPanel";
+import { useChat } from "./hooks/useChat";
 import type { StatusResponse } from "./api/types";
 
 type View = "upload" | "processing" | "results";
@@ -30,6 +31,9 @@ function App() {
   const [companyName, setCompanyName] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ResultsTab>("dashboard");
   const [explainTarget, setExplainTarget] = useState<ExplainTarget | null>(null);
+  // Owned here so the conversation survives tab switches; cleared when docId changes.
+  const chat = useChat(docId);
+  const chatActive = view === "results" && activeTab === "chat";
 
   function handleUploaded(newDocId: string, newPdfName: string) {
     setDocId(newDocId);
@@ -53,7 +57,7 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className={chatActive ? "app app-chat" : "app"}>
       <header>
         <h1>FinTool</h1>
         {docId && (
@@ -109,10 +113,10 @@ function App() {
                 />
               )}
               {activeTab === "risks" && <RiskTable docId={docId} />}
-              {activeTab === "chat" && <ChatPanel docId={docId} />}
+              {activeTab === "chat" && <ChatPanel chat={chat} />}
             </div>
 
-            {explainTarget && (
+            {explainTarget && !chatActive && (
               <ExplainPanel
                 docId={docId}
                 metricName={explainTarget.metricName}
